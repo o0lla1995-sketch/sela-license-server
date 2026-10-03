@@ -5,11 +5,14 @@
  * db.prepare() would leak Statement objects whose native finalizers can
  * crash under GC on newer Node versions, and it's slower anyway.
  *
- * Tables:
- *  keys         — activation keys the owner creates/sells
- *  activations  — device ↔ key bindings with their expiry
- *  settings     — key/value (contact info etc.)
- *  audit        — every security-relevant event
+ * Tables (v2):
+ *  keys          — activation keys the owner creates/sells (+price)
+ *  activations   — device ↔ key bindings with their expiry
+ *  payments      — actual money received per key (revenue ledger)
+ *  admin_users   — panel accounts (email + scrypt password hash)
+ *  admin_sessions— hashed session tokens for the panel
+ *  settings      — key/value (contact info, pricing, currency…)
+ *  audit         — every security-relevant event
  */
 'use strict';
 
@@ -31,6 +34,7 @@ CREATE TABLE IF NOT EXISTS keys (
   key_hash      TEXT UNIQUE NOT NULL,
   plan_days     INTEGER NOT NULL,
   max_devices   INTEGER NOT NULL DEFAULT 1,
+  price         REAL NOT NULL DEFAULT 0,
   note          TEXT,
   created_at    INTEGER NOT NULL,
   revoked_at    INTEGER
@@ -52,6 +56,42 @@ CREATE TABLE IF NOT EXISTS activations (
 CREATE INDEX IF NOT EXISTS idx_activations_key ON activations(key_id);
 CREATE INDEX IF NOT EXISTS idx_activations_device ON activations(device_id);
 
+CREATE TABLE IF NOT EXISTS payments (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  key_id        INTEGER REFERENCES keys(id),
+  amount        REAL NOT NULL,
+  method        TEXT NOT NULL DEFAULT 'cash',
+  note          TEXT,
+  admin_id      INTEGER,
+  created_at    INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_payments_key ON payments(key_id);
+CREATE INDEX IF NOT EXISTS idx_payments_created ON payments(created_at);
+
+CREATE TABLE IF NOT EXISTS admin_users (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  email         TEXT UNIQUE NOT NULL,
+  name          TEXT NOT NULL,
+  password_hash TEXT NOT NULL,
+  role          TEXT NOT NULL DEFAULT 'staff',
+  disabled      INTEGER NOT NULL DEFAULT 0,
+  created_at    INTEGER NOT NULL,
+  last_login_at INTEGER,
+  last_login_ip TEXT
+);
+
+CREATE TABLE IF NOT EXISTS admin_sessions (
+  token_hash    TEXT PRIMARY KEY,
+  user_id       INTEGER NOT NULL REFERENCES admin_users(id),
+  created_at    INTEGER NOT NULL,
+  expires_at    INTEGER NOT NULL,
+  ip            TEXT,
+  user_agent    TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON admin_sessions(user_id);
+
 CREATE TABLE IF NOT EXISTS settings (
   k TEXT PRIMARY KEY,
   v TEXT NOT NULL
@@ -63,46 +103,114 @@ CREATE TABLE IF NOT EXISTS audit (
   event   TEXT NOT NULL,
   key_id  INTEGER,
   device_id TEXT,
+  admin_id INTEGER,
   ip      TEXT,
   details TEXT
 );
 `);
 
+// ── in-place migrations for databases created by v1 ─────────────
+(function migrate() {
+  const cols = new Set(
+    db.prepare('PRAGMA table_info(keys)').all().map(c => c.name),
+  );
+  if (!cols.has('price')) {
+    db.exec('ALTER TABLE keys ADD COLUMN price REAL NOT NULL DEFAULT 0');
+  }
+  const auditCols = new Set(
+    db.prepare('PRAGMA table_info(audit)').all().map(c => c.name),
+  );
+  if (!auditCols.has('admin_id')) {
+    db.exec('ALTER TABLE audit ADD COLUMN admin_id INTEGER');
+  }
+})();
+
+// ── default settings (first boot only — never overwrite) ────────
+const DEFAULT_SETTINGS = {
+  contact_phone: process.env.CONTACT_PHONE || '',
+  contact_whatsapp: process.env.CONTACT_WHATSAPP || '',
+  contact_telegram: process.env.CONTACT_TELEGRAM || '',
+  contact_email: process.env.CONTACT_EMAIL || '',
+  contact_note: process.env.CONTACT_NOTE || 'لشراء أو تجديد الاشتراك تواصل معنا عبر أحد قنوات التواصل',
+  currency: '₪',
+  price_trial: '0',
+  price_monthly: '50',
+  price_quarterly: '120',
+  price_yearly: '400',
+};
+{
+  const insertDefault = db.prepare(
+    'INSERT OR IGNORE INTO settings (k, v) VALUES (?, ?)',
+  );
+  for (const [k, v] of Object.entries(DEFAULT_SETTINGS)) {
+    insertDefault.run(k, v);
+  }
+}
+
 // ── cached statements ────────────────────────────────────────────
 
 const stmt = {
+  // settings
   getSetting: db.prepare('SELECT v FROM settings WHERE k = ?'),
   upsertSetting: db.prepare(
     'INSERT INTO settings (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v',
   ),
-  insertAudit: db.prepare(
-    'INSERT INTO audit (ts, event, key_id, device_id, ip, details) VALUES (?, ?, ?, ?, ?, ?)',
-  ),
 
+  // audit
+  insertAudit: db.prepare(
+    'INSERT INTO audit (ts, event, key_id, device_id, admin_id, ip, details) VALUES (?, ?, ?, ?, ?, ?, ?)',
+  ),
+  recentAudit: db.prepare('SELECT * FROM audit ORDER BY id DESC LIMIT ?'),
+
+  // keys
   keyByHash: db.prepare('SELECT * FROM keys WHERE key_hash = ?'),
   keyById: db.prepare('SELECT * FROM keys WHERE id = ?'),
   insertKey: db.prepare(
-    `INSERT INTO keys (key_plain, key_hash, plan_days, max_devices, note, created_at)
-     VALUES (?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO keys (key_plain, key_hash, plan_days, max_devices, price, note, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
   ),
   listKeys: db.prepare(
-    `SELECT k.id, k.key_plain, k.plan_days, k.max_devices, k.note,
+    `SELECT k.id, k.key_plain, k.plan_days, k.max_devices, k.price, k.note,
             k.created_at, k.revoked_at,
             (SELECT COUNT(*) FROM activations a
               WHERE a.key_id = k.id AND a.unbound_at IS NULL) AS active_devices,
             (SELECT MAX(a.expires_at) FROM activations a
               WHERE a.key_id = k.id AND a.unbound_at IS NULL) AS latest_expiry,
             (SELECT MAX(a.last_seen) FROM activations a
-              WHERE a.key_id = k.id) AS last_seen
+              WHERE a.key_id = k.id) AS last_seen,
+            (SELECT COALESCE(SUM(p.amount), 0) FROM payments p
+              WHERE p.key_id = k.id) AS paid_sum
      FROM keys k
      ORDER BY k.id DESC
-     LIMIT 500`,
+     LIMIT 1000`,
   ),
+  searchKeys: db.prepare(
+    `SELECT k.id, k.key_plain, k.plan_days, k.max_devices, k.price, k.note,
+            k.created_at, k.revoked_at,
+            (SELECT COUNT(*) FROM activations a
+              WHERE a.key_id = k.id AND a.unbound_at IS NULL) AS active_devices,
+            (SELECT MAX(a.expires_at) FROM activations a
+              WHERE a.key_id = k.id AND a.unbound_at IS NULL) AS latest_expiry,
+            (SELECT MAX(a.last_seen) FROM activations a
+              WHERE a.key_id = k.id) AS last_seen,
+            (SELECT COALESCE(SUM(p.amount), 0) FROM payments p
+              WHERE p.key_id = k.id) AS paid_sum
+     FROM keys k
+     WHERE k.key_plain LIKE ? OR k.note LIKE ?
+     ORDER BY k.id DESC
+     LIMIT 200`,
+  ),
+
+  // activations / bindings
   listBindings: db.prepare(
     `SELECT id, device_id, device_label, activated_at, expires_at, last_seen, unbound_at
      FROM activations WHERE key_id = ? ORDER BY activated_at DESC`,
   ),
-
+  listAllBindings: db.prepare(
+    `SELECT a.*, k.key_plain, k.note AS key_note, k.plan_days
+     FROM activations a JOIN keys k ON k.id = a.key_id
+     ORDER BY a.activated_at DESC LIMIT 1000`,
+  ),
   bindingByKeyDevice: db.prepare(
     'SELECT * FROM activations WHERE key_id = ? AND device_id = ? AND unbound_at IS NULL',
   ),
@@ -128,12 +236,88 @@ const stmt = {
      SET expires_at = expires_at + ?
      WHERE key_id = ? AND unbound_at IS NULL AND expires_at > ?`,
   ),
-
   revokeKey: db.prepare(
     'UPDATE keys SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL',
   ),
   restoreKey: db.prepare('UPDATE keys SET revoked_at = NULL WHERE id = ?'),
 
+  // payments
+  insertPayment: db.prepare(
+    'INSERT INTO payments (key_id, amount, method, note, admin_id, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+  ),
+  listPayments: db.prepare(
+    `SELECT p.*, k.key_plain, k.note AS key_note, u.name AS admin_name
+     FROM payments p
+     LEFT JOIN keys k ON k.id = p.key_id
+     LEFT JOIN admin_users u ON u.id = p.admin_id
+     ORDER BY p.id DESC LIMIT ?`,
+  ),
+  paymentsForKey: db.prepare(
+    `SELECT p.*, u.name AS admin_name FROM payments p
+     LEFT JOIN admin_users u ON u.id = p.admin_id
+     WHERE p.key_id = ? ORDER BY p.id DESC`,
+  ),
+  paymentById: db.prepare('SELECT * FROM payments WHERE id = ?'),
+  deletePayment: db.prepare('DELETE FROM payments WHERE id = ?'),
+  revenueTotal: db.prepare(
+    'SELECT COALESCE(SUM(amount), 0) AS total FROM payments',
+  ),
+  revenueSince: db.prepare(
+    'SELECT COALESCE(SUM(amount), 0) AS total FROM payments WHERE created_at >= ?',
+  ),
+  revenueByMonth: db.prepare(
+    `SELECT strftime('%Y-%m', created_at / 1000, 'unixepoch', 'localtime') AS ym,
+            SUM(amount) AS total, COUNT(*) AS n
+     FROM payments
+     WHERE created_at >= ?
+     GROUP BY ym ORDER BY ym ASC`,
+  ),
+  paymentsSince: db.prepare(
+    'SELECT amount, created_at, key_id FROM payments WHERE created_at >= ?',
+  ),
+
+  // admin users & sessions
+  adminByEmail: db.prepare('SELECT * FROM admin_users WHERE email = ?'),
+  adminById: db.prepare('SELECT * FROM admin_users WHERE id = ?'),
+  listAdmins: db.prepare(
+    'SELECT id, email, name, role, disabled, created_at, last_login_at, last_login_ip FROM admin_users ORDER BY id',
+  ),
+  countAdmins: db.prepare('SELECT COUNT(*) AS n FROM admin_users'),
+  countOwners: db.prepare(
+    "SELECT COUNT(*) AS n FROM admin_users WHERE role = 'owner' AND disabled = 0",
+  ),
+  insertAdmin: db.prepare(
+    `INSERT INTO admin_users (email, name, password_hash, role, disabled, created_at)
+     VALUES (?, ?, ?, ?, 0, ?)`,
+  ),
+  updateAdmin: db.prepare(
+    `UPDATE admin_users SET name = COALESCE(?, name), role = COALESCE(?, role),
+      disabled = COALESCE(?, disabled), password_hash = COALESCE(?, password_hash)
+     WHERE id = ?`,
+  ),
+  touchAdminLogin: db.prepare(
+    'UPDATE admin_users SET last_login_at = ?, last_login_ip = ? WHERE id = ?',
+  ),
+  insertSession: db.prepare(
+    'INSERT INTO admin_sessions (token_hash, user_id, created_at, expires_at, ip, user_agent) VALUES (?, ?, ?, ?, ?, ?)',
+  ),
+  sessionByToken: db.prepare(
+    `SELECT s.*, u.email, u.name, u.role, u.disabled
+     FROM admin_sessions s JOIN admin_users u ON u.id = s.user_id
+     WHERE s.token_hash = ?`,
+  ),
+  deleteSession: db.prepare('DELETE FROM admin_sessions WHERE token_hash = ?'),
+  deleteSessionsForUser: db.prepare(
+    'DELETE FROM admin_sessions WHERE user_id = ? AND token_hash != ?',
+  ),
+  refreshSession: db.prepare(
+    'UPDATE admin_sessions SET expires_at = ? WHERE token_hash = ?',
+  ),
+  purgeExpiredSessions: db.prepare(
+    'DELETE FROM admin_sessions WHERE expires_at < ?',
+  ),
+
+  // stats
   statsTotalKeys: db.prepare('SELECT COUNT(*) n FROM keys'),
   statsActiveKeys: db.prepare(
     `SELECT COUNT(DISTINCT k.id) n FROM keys k
@@ -150,8 +334,50 @@ const stmt = {
     `SELECT COUNT(*) n FROM activations
      WHERE unbound_at IS NULL AND expires_at > ? AND expires_at < ?`,
   ),
-  recentAudit: db.prepare('SELECT * FROM audit ORDER BY id DESC LIMIT ?'),
+  statsUnusedKeys: db.prepare(
+    `SELECT COUNT(*) n FROM keys k
+     WHERE k.revoked_at IS NULL
+       AND NOT EXISTS (SELECT 1 FROM activations a WHERE a.key_id = k.id)`,
+  ),
+  statsUnpaidKeys: db.prepare(
+    `SELECT COUNT(*) n FROM keys k
+     WHERE k.price > 0
+       AND (SELECT COALESCE(SUM(p.amount), 0) FROM payments p WHERE p.key_id = k.id) < k.price`,
+  ),
+  planDistribution: db.prepare(
+    `SELECT k.plan_days, COUNT(*) AS n, COALESCE(SUM(k.price), 0) AS value
+     FROM keys k
+     JOIN activations a ON a.key_id = k.id
+     WHERE a.unbound_at IS NULL AND a.expires_at > ?
+     GROUP BY k.plan_days ORDER BY k.plan_days`,
+  ),
+  activationsByDay: db.prepare(
+    `SELECT strftime('%Y-%m-%d', activated_at / 1000, 'unixepoch', 'localtime') AS d,
+            COUNT(*) AS n
+     FROM activations WHERE activated_at >= ? GROUP BY d`,
+  ),
+  expiringList: db.prepare(
+    `SELECT k.key_plain, k.note, k.plan_days, a.device_label, a.expires_at
+     FROM activations a JOIN keys k ON k.id = a.key_id
+     WHERE a.unbound_at IS NULL AND a.expires_at > ? AND a.expires_at < ?
+     ORDER BY a.expires_at ASC LIMIT 30`,
+  ),
+  deviceSeenSince: db.prepare(
+    'SELECT COUNT(*) n FROM activations WHERE unbound_at IS NULL AND last_seen >= ?',
+  ),
+  mrrRows: db.prepare(
+    `SELECT k.price, k.plan_days FROM keys k
+     JOIN activations a ON a.key_id = k.id
+     WHERE a.unbound_at IS NULL AND a.expires_at > ?`,
+  ),
 };
+
+// Purge expired sessions hourly (plus once at boot).
+function purgeSessions() {
+  stmt.purgeExpiredSessions.run(Date.now());
+}
+purgeSessions();
+setInterval(purgeSessions, 3600 * 1000).unref();
 
 // ── helpers ──────────────────────────────────────────────────────
 
@@ -164,12 +390,13 @@ function setSetting(k, v) {
   stmt.upsertSetting.run(k, String(v));
 }
 
-function audit(event, {keyId = null, deviceId = null, ip = null, details = null} = {}) {
+function audit(event, {keyId = null, deviceId = null, adminId = null, ip = null, details = null} = {}) {
   stmt.insertAudit.run(
     Date.now(),
     event,
     keyId,
     deviceId,
+    adminId,
     ip,
     details ? JSON.stringify(details) : null,
   );

@@ -126,10 +126,55 @@ function hashKey(plainKey) {
   return crypto.createHash('sha256').update(plainKey).digest('hex');
 }
 
+// ── panel account passwords (scrypt) ─────────────────────────────
+// Format: scrypt$N$r$p$<salt hex>$<hash hex>
+
+const SCRYPT_N = 16384, SCRYPT_r = 8, SCRYPT_p = 1, SCRYPT_KEYLEN = 64;
+
+function hashPassword(password) {
+  const salt = crypto.randomBytes(16);
+  const hash = crypto.scryptSync(String(password), salt, SCRYPT_KEYLEN, {
+    N: SCRYPT_N, r: SCRYPT_r, p: SCRYPT_p,
+  });
+  return [
+    'scrypt', SCRYPT_N, SCRYPT_r, SCRYPT_p,
+    salt.toString('hex'), hash.toString('hex'),
+  ].join('$');
+}
+
+function verifyPassword(password, stored) {
+  try {
+    const parts = String(stored).split('$');
+    if (parts.length !== 6 || parts[0] !== 'scrypt') return false;
+    const [, N, r, p, saltHex, hashHex] = parts;
+    const hash = crypto.scryptSync(String(password), Buffer.from(saltHex, 'hex'), SCRYPT_KEYLEN, {
+      N: Number(N), r: Number(r), p: Number(p),
+    });
+    const expected = Buffer.from(hashHex, 'hex');
+    return hash.length === expected.length &&
+      crypto.timingSafeEqual(hash, expected);
+  } catch (_) {
+    return false;
+  }
+}
+
+/** Random URL-safe session token (shown to the client once). */
+function generateSessionToken() {
+  return crypto.randomBytes(32).toString('base64url');
+}
+
+function sha256Hex(text) {
+  return crypto.createHash('sha256').update(text).digest('hex');
+}
+
 module.exports = {
   signLicensePayload,
   verifyLicensePair,
   generateActivationKey,
   hashKey,
   PUBLIC_KEY_RAW_HEX,
+  hashPassword,
+  verifyPassword,
+  generateSessionToken,
+  sha256Hex,
 };

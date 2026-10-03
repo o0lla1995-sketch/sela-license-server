@@ -28,6 +28,7 @@ function contactPayload() {
   return {
     phone: getSetting('contact_phone', process.env.CONTACT_PHONE || ''),
     whatsapp: getSetting('contact_whatsapp', process.env.CONTACT_WHATSAPP || ''),
+    telegram: getSetting('contact_telegram', process.env.CONTACT_TELEGRAM || ''),
     email: getSetting('contact_email', process.env.CONTACT_EMAIL || ''),
     note: getSetting('contact_note', process.env.CONTACT_NOTE || ''),
   };
@@ -57,12 +58,16 @@ function buildRouter() {
   });
 
   router.get('/config', (_req, res) => {
+    const currency = getSetting('currency', '₪');
     res.json({
       ok: true,
       contact: contactPayload(),
+      currency,
       plans: [
-        {id: 'monthly', days: 30, label: 'شهري'},
-        {id: 'yearly', days: 365, label: 'سنوي'},
+        {id: 'trial', days: 7, label: 'تجريبي', price: Number(getSetting('price_trial', '0'))},
+        {id: 'monthly', days: 30, label: 'شهري', price: Number(getSetting('price_monthly', '50'))},
+        {id: 'quarterly', days: 90, label: 'ربع سنوي', price: Number(getSetting('price_quarterly', '120'))},
+        {id: 'yearly', days: 365, label: 'سنوي', price: Number(getSetting('price_yearly', '400'))},
       ],
     });
   });

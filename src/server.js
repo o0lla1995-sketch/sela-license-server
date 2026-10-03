@@ -1,7 +1,8 @@
 /**
  * server.js — sela license server entry point.
  * ─────────────────────────────────────────────────────────────────
- * Zero-config on Coolify: set PORT, DATA_DIR, ADMIN_TOKEN and
+ * Zero-config on Coolify: set PORT, DATA_DIR and (optionally)
+ * ADMIN_EMAIL / ADMIN_PASSWORD for the first panel account, plus
  * LICENSE_SIGNING_PRIVATE_KEY (see .env.example), deploy, done.
  */
 'use strict';
@@ -10,7 +11,12 @@ const express = require('express');
 const path = require('path');
 const {buildRouter} = require('./routes');
 const {buildAdminRouter} = require('./admin');
-const {getSetting, setSetting} = require('./db');
+const {
+  buildAuthRouter,
+  buildAdminUsersRouter,
+  buildRequireAdmin,
+  seedOwnerFromEnv,
+} = require('./auth');
 
 const app = express();
 app.disable('x-powered-by');
@@ -36,18 +42,21 @@ try {
 const PORT = Number(process.env.PORT || 3000);
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || '';
 
-// First-boot defaults for the contact info from env.
-if (!getSetting('contact_phone', '')) {
-  setSetting('contact_phone', process.env.CONTACT_PHONE || '');
-  setSetting('contact_whatsapp', process.env.CONTACT_WHATSAPP || '');
-  setSetting('contact_email', process.env.CONTACT_EMAIL || '');
-  setSetting('contact_note', process.env.CONTACT_NOTE || '');
-}
+// Seed the first owner account (email + password) if none exists.
+seedOwnerFromEnv();
 
 app.use(express.json({limit: '64kb'}));
 
+// Security headers for the panel.
+app.use((_req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  next();
+});
+
 // ── per-IP rate limiting (sliding window, in-memory) ─────────────
-const RATE_LIMIT = 60; // requests
+const RATE_LIMIT = 90; // requests
 const RATE_WINDOW_MS = 60 * 1000; // per minute
 const hits = new Map();
 
@@ -59,7 +68,7 @@ setInterval(() => {
   }
 }, 30 * 1000).unref();
 
-app.use('/api/v1', (req, res, next) => {
+app.use('/api', (req, res, next) => {
   const ip = req.ip || 'unknown';
   const now = Date.now();
   let arr = hits.get(ip);
@@ -79,18 +88,12 @@ app.use('/api/v1', (req, res, next) => {
 
 app.use('/api/v1', buildRouter());
 
-function requireAdmin(req, res, next) {
-  const header = req.headers.authorization || '';
-  const token = header.startsWith('Bearer ') ? header.slice(7) : '';
-  if (!ADMIN_TOKEN || token !== ADMIN_TOKEN) {
-    return res.status(401).json({ok: false, error: 'UNAUTHORIZED'});
-  }
-  next();
-}
+const requireAdmin = buildRequireAdmin(ADMIN_TOKEN);
+app.use('/api/admin/auth', buildAuthRouter(requireAdmin)); // /login is open inside
+app.use('/api/admin', requireAdmin, buildAdminRouter());
+app.use('/api/admin', requireAdmin, buildAdminUsersRouter());
 
-app.use('/api/admin', buildAdminRouter(requireAdmin));
-
-// Admin web panel (single file, Arabic RTL).
+// Admin web panel (Arabic RTL SPA).
 app.use(
   express.static(path.join(__dirname, 'public'), {
     setHeaders(res, filePath) {
@@ -113,11 +116,12 @@ app.use((error, _req, res, _next) => {
 
 const listener = app.listen(PORT, '0.0.0.0', () => {
   console.log(`[sela-license] listening on :${PORT}`);
-  if (!ADMIN_TOKEN) {
-    console.warn(
-      '[sela-license] WARNING: ADMIN_TOKEN is not set — the admin panel/API is disabled.',
-    );
-  }
 });
+if (!ADMIN_TOKEN) {
+  console.log(
+    '[sela-license] ADMIN_TOKEN not set — root-token auth disabled ' +
+      '(panel uses email/password accounts).',
+  );
+}
 
 module.exports = listener;
