@@ -565,6 +565,7 @@ async function keyDetail(id) {
         : `<button class="btn danger small" onclick="keyRevoke(${k.id})">إيقاف المفتاح</button>`}
       <div class="spacer"></div>
       <button class="btn ghost small" onclick="copyText('${esc(k.key_plain)}','المفتاح')">نسخ المفتاح</button>
+      <button class="btn danger small" onclick="keyDelete(${k.id})">حذف نهائي</button>
     </div>`);
 }
 
@@ -660,6 +661,17 @@ async function keyRestore(id) {
     toast('تمت استعادة المفتاح');
     keyDetail(id);
   } catch (_) { toast('فشلت الاستعادة', false); }
+}
+
+function keyDelete(id) {
+  confirmBox('حذف نهائي', 'سيُحذف المفتاح مع كل أجهزته ومدفوعاته من السجلات نهائياً. متابعة؟', 'حذف نهائي', async () => {
+    try {
+      await api(`/keys/${id}/delete`, 'POST');
+      toast('تم حذف المفتاح نهائياً');
+      closeModal();
+      route();
+    } catch (_) { toast('فشل الحذف', false); }
+  });
 }
 
 /* ═════════════════════ PAYMENTS ═════════════════════ */

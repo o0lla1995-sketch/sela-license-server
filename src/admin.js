@@ -220,6 +220,26 @@ function buildAdminRouter() {
     res.json({ok: true, freed: result.changes > 0});
   });
 
+  // ── hard delete a key (cascades bindings + payments) ───────────
+
+  router.post('/keys/:id/delete', (req, res) => {
+    const id = Number(req.params.id);
+    const key = stmt.keyById.get(id);
+    if (!key) return res.status(404).json({ok: false, error: 'NOT_FOUND'});
+    db.transaction(() => {
+      db.prepare('DELETE FROM payments WHERE key_id = ?').run(id);
+      db.prepare('DELETE FROM activations WHERE key_id = ?').run(id);
+      db.prepare('DELETE FROM keys WHERE id = ?').run(id);
+    })();
+    audit('admin_delete_key', {
+      keyId: id,
+      adminId: req.adminUser.id,
+      ip: req.ip,
+      details: {key: key.key_plain, note: key.note},
+    });
+    res.json({ok: true});
+  });
+
   // ── mark key paid (defaults to the remaining balance) ──────────
 
   router.post('/keys/:id/pay', (req, res) => {
