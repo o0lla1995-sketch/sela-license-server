@@ -167,6 +167,14 @@ function buildAdminRouter() {
     let paymentId = null;
 
     db.transaction(() => {
+      // v2 (sela v33 round-41 #5): التجديد يمدّد نافذة المفتاح نفسها
+      // (من الآن أو نهاية النافذة الحالية أيهما أبعد) فتنالها كل
+      // الأجهزة، حتى التي تربط لاحقاً بعد التجديد.
+      const key = stmt.keyById.get(id);
+      if (key) {
+        const base = Math.max(now, key.plan_expires_at ?? now);
+        stmt.extendKeyPlan.run(now, base, nDays * DAY_MS, id);
+      }
       const result = stmt.extendActiveBindings.run(nDays * DAY_MS, id, now);
       affected = result.changes;
       if (affected > 0 && amount !== undefined && amount !== null && Number(amount) > 0) {

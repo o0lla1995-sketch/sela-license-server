@@ -99,6 +99,36 @@ function buildRouter() {
     }
 
     const now = Date.now();
+
+    // ── v2 (sela v33 round-41 #5): نافذة الخطة تُرسّخ على المفتاح
+    // نفسه عند أول تفعيل EVER — لا على الجهاز. حذف التطبيق وإعادة
+    // التفعيل بنفس المفتاح (بمعرّف جهاز جديد) لا يعيد عقرب الساعة:
+    // الربط الجديد يرث نهاية نافذة المفتاح نفسها.
+    let keyWithPlan = keyRow;
+    if (keyWithPlan.first_activated_at == null) {
+      const planExpiresAt = now + keyRow.plan_days * DAY_MS;
+      stmt.anchorKeyPlan.run(now, planExpiresAt, keyRow.id);
+      keyWithPlan = stmt.keyByHash.get(hashKey(key)); // re-read with the window
+      audit('activate_anchored_plan', {
+        keyId: keyRow.id,
+        deviceId,
+        ip,
+        details: {firstActivatedAt: now, planExpiresAt},
+      });
+    }
+
+    // نافذة المفتاح منتهية → منتهية لكل جهاز وإلى الأبد (حتى تجديدها
+    // من الإدارة).
+    if (keyWithPlan.plan_expires_at != null && keyWithPlan.plan_expires_at <= now) {
+      audit('activate_expired_key_window', {
+        keyId: keyRow.id,
+        deviceId,
+        ip,
+        details: {planExpiresAt: keyWithPlan.plan_expires_at},
+      });
+      return respondError(res, 403, 'KEY_EXPIRED');
+    }
+
     let binding = stmt.bindingByKeyDevice.get(keyRow.id, deviceId);
 
     if (!binding) {
@@ -107,7 +137,8 @@ function buildRouter() {
         audit('activate_device_limit', {keyId: keyRow.id, deviceId, ip});
         return respondError(res, 403, 'DEVICE_LIMIT');
       }
-      const expiresAt = now + keyRow.plan_days * DAY_MS;
+      // v2: الربط يرث نهاية نافذة المفتاح — لا «الآن + المدة».
+      const expiresAt = keyWithPlan.plan_expires_at ?? now + keyRow.plan_days * DAY_MS;
       stmt.insertBinding.run(
         keyRow.id,
         deviceId,
@@ -145,7 +176,9 @@ function buildRouter() {
       keyId: keyRow.id,
       plan,
       deviceId,
-      activatedAt: binding.activated_at,
+      // v2: بداية الخطة = أول تفعيل للمفتاح على الإطلاق (مرساة
+      // الخادم المضادة للغش) — لا تاريخ ربط هذا الجهاز.
+      activatedAt: keyWithPlan.first_activated_at ?? binding.activated_at,
       expiresAt: binding.expires_at,
     };
     const {license, signature} = signLicensePayload(payload);
@@ -155,6 +188,8 @@ function buildRouter() {
       signature,
       serverTime: now,
       expiresInDays: Math.ceil((binding.expires_at - now) / DAY_MS),
+      // v2: بداية الخطة من الخادم — أول تفعيل للمفتاح EVER.
+      planStartedAt: keyWithPlan.first_activated_at ?? binding.activated_at,
       contact: contactPayload(),
     });
   });

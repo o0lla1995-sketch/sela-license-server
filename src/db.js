@@ -117,6 +117,31 @@ CREATE TABLE IF NOT EXISTS audit (
   if (!cols.has('price')) {
     db.exec('ALTER TABLE keys ADD COLUMN price REAL NOT NULL DEFAULT 0');
   }
+  // v2 (sela v33 round-41 #5): نافذة الخطة تخص المفتاح نفسه —
+  // تُرسّخ عند أول تفعيل EVER لأي جهاز ولا تُعاد أبداً (منع الغش
+  // بحذف التطبيق وإعادة التفعيل بنفس المفتاح). كل ربط جديد (أي
+  // جهاز، حتى بعد مسح الجهاز وإعادة التثبيت بمعرّف جديد) يرث نفس
+  // النافذة.
+  if (!cols.has('first_activated_at')) {
+    db.exec('ALTER TABLE keys ADD COLUMN first_activated_at INTEGER');
+  }
+  if (!cols.has('plan_expires_at')) {
+    db.exec('ALTER TABLE keys ADD COLUMN plan_expires_at INTEGER');
+  }
+  // Backfill: المفاتيح المفعّلة سابقاً ترث أول تفعيل لها كمرساة،
+  // وأبعد انتهاء ربط نشط كنهاية نافذة (لا يقصّر اشتراكاً حياً).
+  db.exec(`
+    UPDATE keys
+    SET first_activated_at = (
+          SELECT MIN(a.activated_at) FROM activations a WHERE a.key_id = keys.id
+        ),
+        plan_expires_at = (
+          SELECT MAX(a.expires_at) FROM activations a
+          WHERE a.key_id = keys.id AND a.unbound_at IS NULL
+        )
+    WHERE first_activated_at IS NULL
+      AND EXISTS (SELECT 1 FROM activations a WHERE a.key_id = keys.id)
+  `);
   const auditCols = new Set(
     db.prepare('PRAGMA table_info(audit)').all().map(c => c.name),
   );
@@ -171,7 +196,7 @@ const stmt = {
   ),
   listKeys: db.prepare(
     `SELECT k.id, k.key_plain, k.plan_days, k.max_devices, k.price, k.note,
-            k.created_at, k.revoked_at,
+            k.created_at, k.revoked_at, k.first_activated_at, k.plan_expires_at,
             (SELECT COUNT(*) FROM activations a
               WHERE a.key_id = k.id AND a.unbound_at IS NULL) AS active_devices,
             (SELECT MAX(a.expires_at) FROM activations a
@@ -186,7 +211,7 @@ const stmt = {
   ),
   searchKeys: db.prepare(
     `SELECT k.id, k.key_plain, k.plan_days, k.max_devices, k.price, k.note,
-            k.created_at, k.revoked_at,
+            k.created_at, k.revoked_at, k.first_activated_at, k.plan_expires_at,
             (SELECT COUNT(*) FROM activations a
               WHERE a.key_id = k.id AND a.unbound_at IS NULL) AS active_devices,
             (SELECT MAX(a.expires_at) FROM activations a
@@ -240,6 +265,18 @@ const stmt = {
     'UPDATE keys SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL',
   ),
   restoreKey: db.prepare('UPDATE keys SET revoked_at = NULL WHERE id = ?'),
+  // v2 (sela v33 round-41 #5): نافذة خطة المفتاح — مرساتها أول تفعيل
+  // EVER، وتمديدها بيد الإدارة فقط.
+  anchorKeyPlan: db.prepare(
+    `UPDATE keys
+     SET first_activated_at = ?, plan_expires_at = ?
+     WHERE id = ? AND first_activated_at IS NULL`
+  ),
+  extendKeyPlan: db.prepare(
+    `UPDATE keys
+     SET plan_expires_at = MAX(COALESCE(plan_expires_at, ?), ?) + ?
+     WHERE id = ?`
+  ),
 
   // payments
   insertPayment: db.prepare(
