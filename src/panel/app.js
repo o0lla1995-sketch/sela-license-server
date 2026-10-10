@@ -277,10 +277,12 @@ $$('.nav-item').forEach((n) => {
 function openSidebar() {
   $('#sidebar').classList.add('open');
   $('#backdrop').classList.add('show');
+  document.body.classList.add('drawer-open'); // freeze the page behind
 }
 function closeSidebar() {
   $('#sidebar').classList.remove('open');
   $('#backdrop').classList.remove('show');
+  document.body.classList.remove('drawer-open');
 }
 $('#burgerBtn').addEventListener('click', openSidebar);
 $('#sidebarClose').addEventListener('click', closeSidebar);
@@ -291,13 +293,46 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') closeSidebar();
 });
 
-/* never leave the drawer/backdrop stuck when crossing to desktop */
+/* swipe-to-close on touch: the drawer lives on the right edge (RTL),
+   so a deliberate swipe toward the right edge closes it. */
+(function () {
+  const sb = $('#sidebar');
+  if (!sb) return;
+  let sx = null, sy = null;
+  sb.addEventListener('touchstart', (e) => {
+    if (e.touches.length !== 1) { sx = null; return; }
+    sx = e.touches[0].clientX;
+    sy = e.touches[0].clientY;
+  }, {passive: true});
+  sb.addEventListener('touchend', (e) => {
+    if (sx === null) return;
+    const t = e.changedTouches[0];
+    const dx = t.clientX - sx;
+    const dy = t.clientY - sy;
+    sx = null;
+    if (dx > 64 && Math.abs(dx) > Math.abs(dy) * 1.4) closeSidebar();
+  }, {passive: true});
+})();
+
+/* absolute guarantee: whenever the drawer is open and the viewport
+   grows to desktop width, it closes and the scroll lock is released. */
 (function () {
   const mq = window.matchMedia('(min-width: 1025px)');
   const onChange = () => { if (mq.matches) closeSidebar(); };
   if (mq.addEventListener) mq.addEventListener('change', onChange);
   else if (mq.addListener) mq.addListener(onChange);
+  window.addEventListener('orientationchange', () => {
+    if (window.matchMedia('(min-width: 1025px)').matches) closeSidebar();
+  });
 })();
+
+/* safety: if the page is ever unloaded/reloaded while the drawer is
+   open, never leave the scroll-lock class behind. */
+window.addEventListener('pageshow', () => {
+  if (!$('#sidebar').classList.contains('open')) {
+    document.body.classList.remove('drawer-open');
+  }
+});
 
 /* desktop rail (collapse) — persisted per browser */
 const RAIL_KEY = 'sela_panel_rail';

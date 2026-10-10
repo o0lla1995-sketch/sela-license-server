@@ -129,9 +129,21 @@ app.use('/api', (req, res, next) => {
 const SITE_DIR = path.join(__dirname, 'site');   // public marketing site
 const PANEL_DIR = path.join(__dirname, 'panel'); // admin SPA (secret path)
 
-const noStoreHtml = (res, filePath) => {
+/* Cache policy for HTML/CSS/JS:
+ *   .html → no-store  (always fresh document)
+ *   .css/.js → no-cache (revalidate every load — cheap 304s via ETag,
+ *             but a deployed update can never be missed because a
+ *             phone kept a heuristically-cached old asset)
+ *   images → public 1 day (they change rarely and are harmless)
+ * This is what made some phones keep running an old panel build
+ * after an update was deployed. */
+const staticHeaders = (res, filePath) => {
   if (filePath.endsWith('.html')) {
     res.setHeader('Cache-Control', 'no-store');
+  } else if (filePath.endsWith('.css') || filePath.endsWith('.js')) {
+    res.setHeader('Cache-Control', 'no-cache');
+  } else {
+    res.setHeader('Cache-Control', 'public, max-age=86400');
   }
 };
 
@@ -160,15 +172,26 @@ app.use(
     res.setHeader('X-Robots-Tag', 'noindex, nofollow');
     next();
   },
-  express.static(PANEL_DIR, {setHeaders: noStoreHtml}),
+  express.static(PANEL_DIR, {setHeaders: staticHeaders}),
 );
 
 // ── 6) public marketing pages ─────────────────────────────────────
+const POLICY_PAGES = {
+  usage: 'policy-usage.html',      // شروط الاستخدام وسياسة الاستخدام
+  privacy: 'policy-privacy.html',  // سياسة الخصوصية
+  deletion: 'policy-deletion.html', // سياسة حذف البيانات
+};
+app.get('/policies/:page', (req, res, next) => {
+  const file = POLICY_PAGES[String(req.params.page || '')];
+  if (!file) return next(); // unknown policy → generic 404 (nothing revealed)
+  res.setHeader('Cache-Control', 'no-store');
+  res.sendFile(path.join(SITE_DIR, file));
+});
 app.get('/contact', (_req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   res.sendFile(path.join(SITE_DIR, 'contact.html'));
 });
-app.use(express.static(SITE_DIR, {setHeaders: noStoreHtml}));
+app.use(express.static(SITE_DIR, {setHeaders: staticHeaders}));
 
 // ── 7) /api 404 (JSON) ────────────────────────────────────────────
 app.use('/api', (_req, res) => {

@@ -270,7 +270,19 @@ a { color: inherit; text-decoration: none; }
 }
 .backdrop.show { opacity: 1; pointer-events: auto; }
 
-.content { padding: 26px; max-width: 1240px; width: 100%; margin: 0 auto; flex: 1; }
+.content {
+  padding: 26px;
+  max-width: 1240px;
+  width: 100%;
+  margin: 0 auto;
+  flex: 1;
+  min-width: 0;
+  /* final safety net: nothing may ever push the page sideways —
+     the only legit horizontal scroller (.table-wrap) scrolls inside
+     its own box, so clipping the column is safe. */
+  overflow-x: hidden;
+  overflow-x: clip;
+}
 
 .page-head {
   display: flex;
@@ -283,6 +295,12 @@ a { color: inherit; text-decoration: none; }
 .page-head h1 { font-size: 22px; font-weight: 900; }
 .page-head .sub { color: var(--ink-muted); font-size: 13px; margin-top: 2px; }
 .page-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+@media (max-width: 640px) {
+  .page-head { margin-bottom: 16px; }
+  .page-head h1 { font-size: 19px; }
+  .page-head .page-actions { width: 100%; }
+  .page-head .page-actions .btn { flex: 1; }
+}
 
 /* ═══════════ COMPONENTS ═══════════ */
 .card {
@@ -365,6 +383,10 @@ select.input option { background: var(--surface-2); }
 .row-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 .row-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
 .row-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+/* grid items must be allowed to shrink below their content size —
+   otherwise a wide table/key inside a card pushes the card out of
+   its grid track and the whole page scrolls sideways (phones). */
+.row-2 > *, .row-3 > *, .row-4 > * { min-width: 0; }
 @media (max-width: 760px) {
   .row-2, .row-3, .row-4 { grid-template-columns: 1fr; }
 }
@@ -836,20 +858,48 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13.5px; min-width
 .opt-row .o-main span { color: var(--ink-muted); font-size: 12px; direction: ltr; display: block; unicode-bidi: embed; }
 .opt-row .o-btns { display: flex; gap: 4px; align-items: center; }
 
-/* audit timeline */
-.tl { display: flex; flex-direction: column; }
+/* timeline (dashboard آخر المدفوعات + اشتراكات تنتهي قريباً، audit, key detail) */
+.tl { display: flex; flex-direction: column; min-width: 0; }
 .tl-row {
   display: flex;
-  gap: 12px;
+  gap: 6px 12px;
   padding: 11px 4px;
   border-bottom: 1px solid var(--line);
   font-size: 13px;
   align-items: baseline;
+  min-width: 0;
 }
 .tl-row:last-child { border-bottom: none; }
-.tl-row .tl-time { color: var(--ink-muted); font-size: 11.5px; white-space: nowrap; direction: ltr; }
-.tl-row .tl-event { font-weight: 700; white-space: nowrap; }
+/* every cell may shrink + ellipsize: a long date/key/amount can never
+   blow the row (and with it the card) out of the page again. */
+.tl-row .tl-time {
+  color: var(--ink-muted);
+  font-size: 11.5px;
+  white-space: nowrap;
+  direction: ltr;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tl-row .tl-event {
+  font-weight: 700;
+  white-space: nowrap;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .tl-row .tl-detail { color: var(--ink-muted); font-size: 12px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: ltr; text-align: right; }
+
+/* phones: every timeline row becomes two clean lines —
+   line 1: التاريخ + المبلغ/المفتاح (+ زر الإجراء في أقصى الطرف)
+   line 2: التفاصيل بكامل العرض. لا شيء يخرج عن سياق الصفحة. */
+@media (max-width: 640px) {
+  .tl-row { flex-wrap: wrap; row-gap: 3px; align-items: center; padding: 10px 2px; }
+  .tl-row .tl-time { flex: 1 1 auto; }
+  .tl-row .tl-event { flex: 0 1 auto; max-width: 62%; }
+  .tl-row .btn { order: 2; margin-inline-start: auto; }
+  .tl-row .tl-detail { order: 3; flex: 1 1 100%; }
+}
 
 /* key detail modal sections */
 .kd-section { margin-top: 16px; }
@@ -892,6 +942,9 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13.5px; min-width
   font-size: 12px;
   padding: 18px;
 }
+
+/* when the mobile drawer is open, the page behind must not scroll */
+body.drawer-open { overflow: hidden; }
 
 /* mobile layout */
 @media (max-width: 1024px) {
