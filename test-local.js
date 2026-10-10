@@ -26,6 +26,7 @@ const env = {
   ADMIN_EMAIL: 'owner@sela.test',
   ADMIN_PASSWORD: 'owner-pass-123',
   ADMIN_TOKEN: 'root-master-token',
+  ADMIN_PATH_SECRET: 'test-secret-panel-1',
   LICENSE_SIGNING_PRIVATE_KEY:
     '302e020100300506032b6570042204208960d794fa492558c0364af79f0d51c88abc4b20b24cc854f60221116924bd93',
   CONTACT_PHONE: '+972 59 111 2222',
@@ -254,10 +255,22 @@ async function main() {
   ok('audit has admin_create_keys', events.includes('admin_create_keys'));
   ok('audit has activate_new_device', events.includes('activate_new_device'));
 
-  console.log('— panel files —');
-  for (const f of ['index.html', 'styles.css', 'app.js']) {
+  console.log('— public site + secret panel files —');
+  // Public marketing site at root:
+  for (const f of ['', 'contact', 'site.css', 'icon-512.png']) {
     const r = await fetch(`${BASE}/${f}`);
-    ok('served ' + f, r.status === 200);
+    ok('served site ' + (f || '/'), r.status === 200);
+  }
+  // Panel only at the secret path (v3):
+  const secret = env.ADMIN_PATH_SECRET;
+  const pr = await fetch(`${BASE}/${secret}/`);
+  ok('panel at secret path', pr.status === 200);
+  const prAsset = await fetch(`${BASE}/${secret}/app.js`);
+  ok('panel app.js at secret path', prAsset.status === 200);
+  // Old/public panel paths must be gone:
+  for (const f of ['app.js', 'styles.css', 'admin']) {
+    const r = await fetch(`${BASE}/${f}`);
+    ok(`hidden ${f} (404)`, r.status === 404);
   }
 
   console.log(`\n${passed} passed, ${failed} failed`);

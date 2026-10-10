@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <radialGradient id="sbg" cx="50%" cy="38%" r="78%">
+      <stop offset="0%" stop-color="#26262F"/>
+      <stop offset="100%" stop-color="#141418"/>
+    </radialGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#sbg)"/>
+
+  <!-- handle: semicircular arc floating above the rim -->
+  <path d="M 174.8 156.4 A 80.6 80.6 0 0 1 336 156.4"
+        fill="none" stroke="#C2410C" stroke-width="19" stroke-linecap="round"/>
+
+  <!-- rim: thin pill bar, slightly wider than the body -->
+  <rect x="117.4" y="225.2" width="277.5" height="27.3" rx="13.6" fill="#C2410C"/>
+
+  <!-- body: tapered trapezoid, sharp bottom corners -->
+  <path d="M 120.9 257.2 L 389.9 257.2 L 355.6 395.9 L 155.2 395.9 Z" fill="#F97316"/>
+
+  <!-- 5 weave lines (follow the taper), drawn behind the S -->
+  <g stroke="#C2410C" stroke-width="9.5" stroke-linecap="butt">
+    <line x1="173.4" y1="258.5" x2="194.3" y2="394.5"/>
+    <line x1="227.2" y1="258.5" x2="234.4" y2="394.5"/>
+    <line x1="255.4" y1="258.5" x2="255.4" y2="394.5"/>
+    <line x1="283.6" y1="258.5" x2="276.4" y2="394.5"/>
+    <line x1="337.4" y1="258.5" x2="316.5" y2="394.5"/>
+  </g>
+
+  <!-- the S letter: bold condensed white, baseline at its bottom -->
+  <text x="255.4" y="374.5" font-family="Arial Black, Arial, Helvetica, sans-serif"
+        font-weight="900" font-size="170" fill="#FFFFFF" text-anchor="middle"
+        textLength="91.3" lengthAdjust="spacingAndGlyphs">S</text>
+</svg>

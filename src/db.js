@@ -97,6 +97,38 @@ CREATE TABLE IF NOT EXISTS settings (
   v TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS media (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  filename      TEXT UNIQUE NOT NULL,
+  title         TEXT,
+  mime          TEXT NOT NULL,
+  size          INTEGER NOT NULL,
+  width         INTEGER,
+  height        INTEGER,
+  sort_order    INTEGER NOT NULL DEFAULT 0,
+  created_at    INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS download_links (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  platform      TEXT UNIQUE NOT NULL,  -- google_play | direct_apk | desktop | apple_store
+  url           TEXT NOT NULL DEFAULT '',
+  label         TEXT,
+  enabled       INTEGER NOT NULL DEFAULT 0,
+  sort_order    INTEGER NOT NULL DEFAULT 0,
+  updated_at    INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS contact_options (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  type          TEXT NOT NULL,          -- phone | whatsapp | telegram | email | website | custom
+  label         TEXT NOT NULL,
+  value         TEXT NOT NULL,
+  enabled       INTEGER NOT NULL DEFAULT 1,
+  sort_order    INTEGER NOT NULL DEFAULT 0,
+  created_at    INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS audit (
   id      INTEGER PRIMARY KEY AUTOINCREMENT,
   ts      INTEGER NOT NULL,
@@ -162,6 +194,24 @@ const DEFAULT_SETTINGS = {
   price_monthly: '50',
   price_quarterly: '120',
   price_yearly: '400',
+  // ── landing page content (v3 — managed from the panel) ──
+  landing_hero_badge: 'التطبيق الأول لإدارة المتاجر والديون',
+  landing_hero_title: 'سيلا — دفتر متجرك الذكي في جيبك',
+  landing_hero_subtitle:
+    'نقاط بيع كاملة بالكاميرا الذكية، دفتر ديون منظّم، مخزون وتقارير دقيقة، وطباعة فورية — كل متجرك في تطبيق واحد يعمل بدون إنترنت.',
+  landing_cta_text: 'حمّل التطبيق الآن مجاناً',
+  landing_show_pricing: '1',
+  site_footer_note: 'سيلا — نظام إدارة المتاجر والاشتراكات',
+  site_seo_description:
+    'تطبيق سيلا لإدارة المتاجر: نقاط بيع، دفتر ديون، مخزون، تقارير وطباعة — يعمل بدون إنترنت ويناسب كل أنواع المتاجر.',
+  landing_features: JSON.stringify([
+    {icon: 'scan', title: 'بيع بالكاميرا الذكية', text: 'وجّه الكاميرا لأي منتج وتعرّف عليه فوراً وبيعه بلمسة واحدة — أسرع طريق لإتمام البيع.'},
+    {icon: 'book', title: 'دفتر ديون إلكتروني', text: 'سجّل ديون الزبائن مع سداد موثّق وتنبيهات تلقائية — لا دفتر ورقي ولا نسيان بعد اليوم.'},
+    {icon: 'store', title: 'يناسب كل المتاجر', text: 'أنماط جاهزة للملابس والصيدليات والمطاعم والمقاهي والبقالة والفواكه — لكل متجر تجربته.'},
+    {icon: 'boxes', title: 'مخزون وتنبيهات', text: 'تتبّع الكميات والمخزون بدقة مع تنبيهات النفاد التلقائية وخصم تلقائي مع كل عملية بيع.'},
+    {icon: 'chart', title: 'تقارير تديرها بنفسك', text: 'أرباح ومبيعات وأداء الساعات وأفضل المنتجات — تقارير واضحة تساعدك تقرر بثقة.'},
+    {icon: 'printer', title: 'طباعة فورية', text: 'فاتورة حرارية للزبون مع دعم الطابعات البلوتوث — اطبع فور إتمام البيع بضغطة زر.'},
+  ]),
 };
 {
   const insertDefault = db.prepare(
@@ -170,6 +220,38 @@ const DEFAULT_SETTINGS = {
   for (const [k, v] of Object.entries(DEFAULT_SETTINGS)) {
     insertDefault.run(k, v);
   }
+}
+
+// ── seed download-link rows (fixed 4 platforms) ──────────────────
+db.exec(`
+  INSERT OR IGNORE INTO download_links (platform, url, label, enabled, sort_order, updated_at) VALUES
+    ('google_play', '', 'من جوجل بلاي', 0, 1, strftime('%s','now') * 1000),
+    ('direct_apk',  '', 'تحميل مباشر APK', 0, 2, strftime('%s','now') * 1000),
+    ('desktop',     '', 'نسخة سطح المكتب', 0, 3, strftime('%s','now') * 1000),
+    ('apple_store', '', 'من آب ستور', 0, 4, strftime('%s','now') * 1000);
+`);
+
+// ── seed contact options from legacy settings (first boot only) ──
+(function seedContactOptions() {
+  const n = db.prepare('SELECT COUNT(*) AS n FROM contact_options').get().n;
+  if (n > 0) return;
+  const s = k => getSettingEarly(k);
+  const seeds = [];
+  if (s('contact_phone')) seeds.push({type: 'phone', label: 'اتصال هاتفي', value: s('contact_phone')});
+  if (s('contact_whatsapp')) seeds.push({type: 'whatsapp', label: 'واتساب', value: s('contact_whatsapp')});
+  if (s('contact_telegram')) seeds.push({type: 'telegram', label: 'تيليجرام', value: s('contact_telegram')});
+  if (s('contact_email')) seeds.push({type: 'email', label: 'البريد الإلكتروني', value: s('contact_email')});
+  const ins = db.prepare(
+    'INSERT INTO contact_options (type, label, value, enabled, sort_order, created_at) VALUES (?, ?, ?, 1, ?, ?)',
+  );
+  const now = Date.now();
+  seeds.forEach((o, i) => ins.run(o.type, o.label, o.value, i + 1, now));
+})();
+
+// tiny local helper used before `stmt` is defined below
+function getSettingEarly(k) {
+  const row = db.prepare('SELECT v FROM settings WHERE k = ?').get(k);
+  return row ? row.v : '';
 }
 
 // ── cached statements ────────────────────────────────────────────
@@ -407,6 +489,59 @@ const stmt = {
      JOIN activations a ON a.key_id = k.id
      WHERE a.unbound_at IS NULL AND a.expires_at > ?`,
   ),
+
+  // ── media (landing screenshots) ─────────────────────────────────
+  insertMedia: db.prepare(
+    `INSERT INTO media (filename, title, mime, size, width, height, sort_order, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  ),
+  listMedia: db.prepare('SELECT * FROM media ORDER BY sort_order ASC, id ASC'),
+  mediaById: db.prepare('SELECT * FROM media WHERE id = ?'),
+  mediaByFilename: db.prepare('SELECT * FROM media WHERE filename = ?'),
+  maxMediaSort: db.prepare('SELECT COALESCE(MAX(sort_order), 0) AS m FROM media'),
+  countMedia: db.prepare('SELECT COUNT(*) AS n FROM media'),
+  mediaBySort: db.prepare('SELECT * FROM media WHERE sort_order = ?'),
+  setMediaSort: db.prepare('UPDATE media SET sort_order = ? WHERE id = ?'),
+  shiftMediaSort: db.prepare('UPDATE media SET sort_order = sort_order + ? WHERE id = ?'),
+  deleteMedia: db.prepare('DELETE FROM media WHERE id = ?'),
+  updateMediaTitle: db.prepare('UPDATE media SET title = ? WHERE id = ?'),
+
+  // ── download links (4 fixed platforms) ──────────────────────────
+  listDownloadLinks: db.prepare('SELECT * FROM download_links ORDER BY sort_order ASC'),
+  downloadLinkByPlatform: db.prepare('SELECT * FROM download_links WHERE platform = ?'),
+  downloadLinkById: db.prepare('SELECT * FROM download_links WHERE id = ?'),
+  upsertDownloadLink: db.prepare(
+    `INSERT INTO download_links (platform, url, label, enabled, sort_order, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(platform) DO UPDATE SET
+       url = excluded.url, label = excluded.label,
+       enabled = excluded.enabled, updated_at = excluded.updated_at`,
+  ),
+  setDownloadLinkEnabled: db.prepare(
+    'UPDATE download_links SET enabled = ?, updated_at = ? WHERE platform = ?',
+  ),
+
+  // ── contact options (website contact page) ──────────────────────
+  listContactOptions: db.prepare(
+    'SELECT * FROM contact_options ORDER BY sort_order ASC, id ASC',
+  ),
+  listEnabledContactOptions: db.prepare(
+    'SELECT * FROM contact_options WHERE enabled = 1 ORDER BY sort_order ASC, id ASC',
+  ),
+  contactOptionById: db.prepare('SELECT * FROM contact_options WHERE id = ?'),
+  insertContactOption: db.prepare(
+    `INSERT INTO contact_options (type, label, value, enabled, sort_order, created_at)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  ),
+  updateContactOption: db.prepare(
+    `UPDATE contact_options SET type = ?, label = ?, value = ?, enabled = ? WHERE id = ?`,
+  ),
+  deleteContactOption: db.prepare('DELETE FROM contact_options WHERE id = ?'),
+  maxContactSort: db.prepare('SELECT COALESCE(MAX(sort_order), 0) AS m FROM contact_options'),
+  contactOptionBySort: db.prepare('SELECT * FROM contact_options WHERE sort_order = ?'),
+  setContactSort: db.prepare('UPDATE contact_options SET sort_order = ? WHERE id = ?'),
+  countContactOptions: db.prepare('SELECT COUNT(*) AS n FROM contact_options'),
+  clearContactOptions: db.prepare('DELETE FROM contact_options'),
 };
 
 // Purge expired sessions hourly (plus once at boot).

@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>سيلا — تطبيق إدارة المتاجر والديون</title>
+<meta name="description" content="تطبيق سيلا لإدارة المتاجر: نقاط بيع بالكاميرا الذكية، دفتر ديون، مخزون، تقارير وطباعة — يعمل بدون إنترنت ويناسب كل أنواع المتاجر.">
+<meta property="og:title" content="سيلا — دفتر متجرك الذكي">
+<meta property="og:description" content="نقاط بيع كاملة، دفتر ديون منظّم، مخزون وتقارير دقيقة — كل متجرك في تطبيق واحد.">
+<meta property="og:type" content="website">
+<link rel="icon" type="image/png" href="/favicon-64.png">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800;900&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/site.css">
+</head>
+<body>
+<div class="bg-fx" aria-hidden="true"></div>
+
+<!-- ══════════ HEADER ══════════ -->
+<header class="site-header">
+  <div class="container inner">
+    <a class="brand" href="/">
+      <img src="/icon-512.png" alt="شعار سيلا">
+      <span class="t"><b>سيلا</b><small>إدارة المتاجر والديون</small></span>
+    </a>
+    <nav class="nav-links" aria-label="التنقل الرئيسي">
+      <a href="#features">المميزات</a>
+      <a href="#screens">صور التطبيق</a>
+      <a href="#pricing">الأسعار</a>
+      <a href="/contact">تواصل معنا</a>
+    </nav>
+    <div class="header-cta">
+      <a class="btn btn-ghost" href="/contact">تواصل معنا</a>
+      <a class="btn btn-primary" href="#download">حمّل التطبيق</a>
+    </div>
+  </div>
+</header>
+
+<main>
+  <!-- ══════════ HERO ══════════ -->
+  <section class="hero">
+    <div class="container inner">
+      <div>
+        <span class="hero-badge" id="heroBadge" hidden><span class="dot"></span><span id="heroBadgeText"></span></span>
+        <h1 id="heroTitle">سيلا — دفتر متجرك <span class="accent">الذكي</span> في جيبك</h1>
+        <p class="lead" id="heroSubtitle">
+          نقاط بيع كاملة بالكاميرا الذكية، دفتر ديون منظّم، مخزون وتقارير دقيقة،
+          وطباعة فورية — كل متجرك في تطبيق واحد يعمل بدون إنترنت.
+        </p>
+
+        <div class="hero-actions" id="downloadButtons">
+          <span class="skeleton" style="width:170px;height:52px;border-radius:13px"></span>
+          <span class="skeleton" style="width:170px;height:52px;border-radius:13px"></span>
+        </div>
+        <p class="hero-note" id="heroNote">مجاني للتجربة · بدون بطاقة · يعمل بدون إنترنت</p>
+      </div>
+
+      <div class="hero-icon-wrap">
+        <div class="glow" aria-hidden="true"></div>
+        <img src="/icon-512.png" alt="أيقونة تطبيق سيلا — سلة برتقالية بحرف S" width="340" height="340">
+      </div>
+    </div>
+  </section>
+
+  <!-- ══════════ STATS STRIP ══════════ -->
+  <section class="section" style="padding-top:8px">
+    <div class="container">
+      <div class="hero-stats reveal" style="justify-content:center">
+        <div class="hero-stat"><b>6</b><span>أنماط متاجر جاهزة</span></div>
+        <div class="hero-stat"><b>100%</b><span>يعمل بدون إنترنت</span></div>
+        <div class="hero-stat"><b>الكاميرا</b><span>تعرّف بصري فوري</span></div>
+        <div class="hero-stat"><b>الطباعة</b><span>فاتورة حرارية</span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ══════════ FEATURES ══════════ -->
+  <section class="section" id="features">
+    <div class="container">
+      <div class="section-head reveal">
+        <span class="kicker">المميزات</span>
+        <h2>كل ما يحتاجه متجرك — في مكان واحد</h2>
+        <p>صُمم سيلا مع أصحاب متاجر حقيقيين ليختصر عليك الوقت ويحفظ حقوقك.</p>
+      </div>
+      <div class="features-grid" id="featuresGrid"><!-- filled from API --></div>
+    </div>
+  </section>
+
+  <!-- ══════════ SCREENSHOTS ══════════ -->
+  <section class="section" id="screens" hidden>
+    <div class="container">
+      <div class="section-head reveal">
+        <span class="kicker">صور التطبيق</span>
+        <h2>شاهد سيلا من الداخل</h2>
+        <p>لقطات حقيقية من التطبيق — بيع، ديون، تقارير وكل شيء بينها.</p>
+      </div>
+      <div class="shots-scroll" id="shotsScroll"><!-- filled from API --></div>
+    </div>
+  </section>
+
+  <!-- ══════════ PRICING ══════════ -->
+  <section class="section" id="pricing" hidden>
+    <div class="container">
+      <div class="section-head reveal">
+        <span class="kicker">الأسعار</span>
+        <h2>خطط بسيطة تناسب كل متجر</h2>
+        <p>جرّب مجاناً ثم اختر الخطة المناسبة — التفعيل برمز فوري.</p>
+      </div>
+      <div class="pricing-grid" id="pricingGrid"><!-- filled from API --></div>
+    </div>
+  </section>
+
+  <!-- ══════════ DOWNLOAD CTA ══════════ -->
+  <section class="section" id="download">
+    <div class="container">
+      <div class="cta-band reveal">
+        <h2 id="ctaTitle">جاهز تنظم متجرك وتريح بالك؟</h2>
+        <p>حمّل سيلا الآن وابدأ البيع خلال دقائق — بياناتك تبقى على جهازك دائماً.</p>
+        <div class="hero-actions" id="ctaButtons"></div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<!-- ══════════ FOOTER ══════════ -->
+<footer class="site-footer">
+  <div class="container inner">
+    <div class="f-brand">
+      <img src="/icon-512.png" alt="">
+      <span id="footerNote">سيلا — نظام إدارة المتاجر والاشتراكات</span>
+    </div>
+    <nav>
+      <a href="#features">المميزات</a>
+      <a href="#pricing">الأسعار</a>
+      <a href="/contact">تواصل معنا</a>
+    </nav>
+    <span class="copy">© <span id="year"></span> سيلا</span>
+  </div>
+</footer>
+
+<script>
+/* ── sela landing — dynamic content from /api/public/site ────── */
+(function () {
+  'use strict';
+
+  var ICONS = {
+    scan: '<svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/><circle cx="12" cy="12" r="3.2"/></svg>',
+    book: '<svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>',
+    store: '<svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l1.5-5.5h15L21 9"/><path d="M4 9v11a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1V9"/><path d="M9 21v-6h6v6"/></svg>',
+    boxes: '<svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8l-9-5-9 5v8l9 5 9-5z"/><path d="M3.3 8.3L12 13l8.7-4.7"/><path d="M12 13v9"/></svg>',
+    chart: '<svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M7 14l4-4 3 3 5-6"/></svg>',
+    printer: '<svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9V3h12v6"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="7" rx="1"/></svg>',
+    star: '<svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l3.1 6.3 6.9 1-5 4.9 1.2 6.8L12 17.8 5.8 21l1.2-6.8-5-4.9 6.9-1z"/></svg>',
+    shield: '<svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-3.6 8-10V5l-8-3-8 3v7c0 6.4 8 10 8 10z"/></svg>',
+    zap: '<svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h7l-1 8 11-13h-7z"/></svg>',
+    users: '<svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>',
+    wallet: '<svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7H4a2 2 0 0 1 0-4h14v4"/><path d="M4 5v14a2 2 0 0 0 2 2h14V7"/><path d="M16 14h2"/></svg>'
+  };
+
+  var PLAY_SVG = '<svg viewBox="0 0 24 24" fill="none"><path d="M4 3.5v17c0 .6.65.95 1.15.63l13.9-8.5a.75.75 0 0 0 0-1.26L5.15 2.87A.75.75 0 0 0 4 3.5z" fill="#34a853"/><path d="M4 3.5l11.4 8.5L4 20.5a.6.6 0 0 1-.25-.5v-16a.6.6 0 0 1 .25-.5z" fill="#4285f4"/><path d="M4 3.5l11.4 8.5 3.1-2.4-13.9-8.4A.75.75 0 0 0 4 3.5z" fill="#fbbc05" opacity=".95"/><path d="M4 20.5L15.4 12l3.1 2.4-13.9 8.4A.75.75 0 0 1 4 20.5z" fill="#ea4335" opacity=".95"/></svg>';
+  var APPLE_SVG = '<svg viewBox="0 0 24 24" fill="#fff"><path d="M16.7 12.9c0-2.4 2-3.6 2.1-3.7-1.1-1.7-2.9-1.9-3.5-1.9-1.5-.2-2.9.9-3.7.9-.8 0-1.9-.9-3.2-.85-1.6 0-3.1 1-4 2.4-1.7 3-.4 7.3 1.2 9.7.8 1.2 1.8 2.5 3.1 2.4 1.2-.05 1.7-.8 3.2-.8s1.9.8 3.2.75c1.3 0 2.2-1.2 3-2.4.9-1.4 1.3-2.7 1.3-2.8-.03-.01-2.6-1-2.7-3.7zM14.4 5.6c.7-.8 1.1-1.9 1-3.1-1 .04-2.1.7-2.8 1.5-.6.7-1.2 1.9-1 3 1.1.1 2.2-.55 2.8-1.4z"/></svg>';
+  var APK_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="#f97316" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M4 19h16"/></svg>';
+  var DESKTOP_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="#38bdf8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="13" rx="2"/><path d="M8 21h8"/><path d="M12 16v5"/></svg>';
+
+  var PLATFORM_META = {
+    google_play: {icon: PLAY_SVG, small: 'حمّله من', big: 'جوجل بلاي'},
+    apple_store: {icon: APPLE_SVG, small: 'حمّله من', big: 'آب ستور'},
+    direct_apk: {icon: APK_SVG, small: 'تثبيت مباشر', big: 'تحميل APK'},
+    desktop: {icon: DESKTOP_SVG, small: 'للحاسوب', big: 'سطح المكتب'}
+  };
+
+  function el(tag, cls, html) {
+    var node = document.createElement(tag);
+    if (cls) node.className = cls;
+    if (html !== undefined) node.innerHTML = html;
+    return node;
+  }
+  function esc(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
+  function badgeHtml(platform, label) {
+    var m = PLATFORM_META[platform] || PLATFORM_META.direct_apk;
+    return '<a class="dl-badge" target="_blank" rel="noopener" data-platform="' + platform + '">' +
+      m.icon +
+      '<span class="txt"><small>' + esc(m.small) + '</small><b>' +
+      esc(label || m.big) + '</b></span></a>';
+  }
+
+  function renderDownloads(container, list) {
+    var enabled = (list || []).filter(function (d) { return d.enabled && d.url; });
+    container.innerHTML = '';
+    if (!enabled.length) {
+      container.innerHTML =
+        '<a class="btn btn-primary" href="/contact">احصل على التطبيق — تواصل معنا</a>';
+      return;
+    }
+    enabled.forEach(function (d) {
+      container.insertAdjacentHTML('beforeend', badgeHtml(d.platform, d.label));
+    });
+    // wire hrefs (innerHTML-built anchors)
+    Array.prototype.forEach.call(container.querySelectorAll('[data-platform]'), function (a) {
+      var p = a.getAttribute('data-platform');
+      var hit = enabled.filter(function (d) { return d.platform === p; })[0];
+      if (hit) a.href = hit.url;
+    });
+  }
+
+  function renderFeatures(list) {
+    var grid = document.getElementById('featuresGrid');
+    grid.innerHTML = '';
+    (list || []).forEach(function (f) {
+      var icon = ICONS[f.icon] || ICONS.star;
+      grid.appendChild(el('div', 'feature-card reveal',
+        '<div class="icon">' + icon + '</div>' +
+        '<h3>' + esc(f.title) + '</h3>' +
+        '<p>' + esc(f.text) + '</p>'));
+    });
+    observeReveals();
+  }
+
+  function renderShots(list) {
+    if (!list || !list.length) return;
+    var sec = document.getElementById('screens');
+    var wrap = document.getElementById('shotsScroll');
+    wrap.innerHTML = '';
+    list.forEach(function (s) {
+      var fig = el('figure', 'shot reveal');
+      fig.innerHTML =
+        '<div class="phone"><div class="notch"></div>' +
+        '<img loading="lazy" src="' + esc(s.url) + '" alt="' +
+        esc(s.title || 'لقطة من تطبيق سيلا') + '"></div>' +
+        (s.title ? '<figcaption>' + esc(s.title) + '</figcaption>' : '');
+      wrap.appendChild(fig);
+    });
+    sec.hidden = false;
+    observeReveals();
+  }
+
+  function renderPricing(p) {
+    if (!p || !p.show) return;
+    var grid = document.getElementById('pricingGrid');
+    grid.innerHTML = '';
+    p.plans.forEach(function (plan, i) {
+      var featured = plan.id === 'quarterly' ? ' featured' : '';
+      var card = el('div', 'plan' + featured);
+      var tag = featured ? '<span class="tag">الأكثر توفيراً</span>' : '';
+      card.innerHTML =
+        tag +
+        '<h3>' + esc(plan.label) + '</h3>' +
+        '<div class="dur">' + plan.days + ' يوم</div>' +
+        '<div class="price">' + esc(plan.priceLabel) + '</div>' +
+        '<ul>' +
+        '<li><svg viewBox="0 0 24 24" fill="none" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>كل المميزات</li>' +
+        '<li><svg viewBox="0 0 24 24" fill="none" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>أجهزة متعددة</li>' +
+        '<li><svg viewBox="0 0 24 24" fill="none" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>دعم فني</li>' +
+        '</ul>' +
+        '<a class="btn btn-primary" href="/contact" style="width:100%">اشترك الآن</a>';
+      grid.appendChild(card);
+    });
+    document.getElementById('pricing').hidden = false;
+    observeReveals();
+  }
+
+  var io = null;
+  function observeReveals() {
+    if (!('IntersectionObserver' in window)) {
+      Array.prototype.forEach.call(document.querySelectorAll('.reveal'), function (n) {
+        n.classList.add('in');
+      });
+      return;
+    }
+    if (!io) {
+      io = new IntersectionObserver(function (entries) {
+        entries.forEach(function (e) {
+          if (e.isIntersecting) { e.target.classList.add('in'); io.unobserve(e.target); }
+        });
+      }, {threshold: 0.12});
+    }
+    Array.prototype.forEach.call(document.querySelectorAll('.reveal:not(.in)'), function (n) {
+      io.observe(n);
+    });
+  }
+
+  document.getElementById('year').textContent = new Date().getFullYear();
+
+  fetch('/api/public/site').then(function (r) { return r.json(); }).then(function (d) {
+    if (!d || !d.ok) return;
+
+    var hero = d.hero || {};
+    if (hero.badge) {
+      document.getElementById('heroBadgeText').textContent = hero.badge;
+      document.getElementById('heroBadge').hidden = false;
+    }
+    if (hero.title) {
+      var h1 = document.getElementById('heroTitle');
+      // keep the gradient on the last word when possible
+      var parts = String(hero.title).split(' ');
+      if (parts.length > 1) {
+        var last = parts.pop();
+        h1.innerHTML = esc(parts.join(' ')) + ' <span class="accent">' + esc(last) + '</span>';
+      } else {
+        h1.textContent = hero.title;
+      }
+    }
+    if (hero.subtitle) document.getElementById('heroSubtitle').textContent = hero.subtitle;
+    if (hero.ctaText) document.getElementById('ctaTitle').textContent = hero.ctaText;
+    if (d.footerNote) document.getElementById('footerNote').textContent = d.footerNote;
+    if (d.seoDescription) document.querySelector('meta[name="description"]').setAttribute('content', d.seoDescription);
+
+    renderDownloads(document.getElementById('downloadButtons'), d.downloads);
+    renderDownloads(document.getElementById('ctaButtons'), d.downloads);
+    renderFeatures(d.features);
+    renderShots(d.screenshots);
+    renderPricing(d.pricing);
+  }).catch(function () {
+    // offline-safe: keep the elegant static fallbacks
+    renderDownloads(document.getElementById('downloadButtons'), []);
+    renderDownloads(document.getElementById('ctaButtons'), []);
+  });
+
+  observeReveals();
+})();
+</script>
+</body>
+</html>
