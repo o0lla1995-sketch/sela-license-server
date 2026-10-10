@@ -263,7 +263,13 @@ window.addEventListener('hashchange', () => {
 
 $$('.nav-item').forEach((n) => {
   n.addEventListener('click', () => {
-    location.hash = '#/' + n.getAttribute('data-nav');
+    const target = '#/' + n.getAttribute('data-nav');
+    closeSidebar(); // close the drawer immediately — even when the route won't change.
+    if (location.hash === target) {
+      route(); // same route: no hashchange will fire, so re-render manually.
+    } else {
+      location.hash = target;
+    }
   });
 });
 
@@ -280,77 +286,109 @@ $('#burgerBtn').addEventListener('click', openSidebar);
 $('#sidebarClose').addEventListener('click', closeSidebar);
 $('#backdrop').addEventListener('click', closeSidebar);
 
+/* close the drawer with Escape */
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeSidebar();
+});
+
+/* never leave the drawer/backdrop stuck when crossing to desktop */
+(function () {
+  const mq = window.matchMedia('(min-width: 1025px)');
+  const onChange = () => { if (mq.matches) closeSidebar(); };
+  if (mq.addEventListener) mq.addEventListener('change', onChange);
+  else if (mq.addListener) mq.addListener(onChange);
+})();
+
+/* desktop rail (collapse) — persisted per browser */
+const RAIL_KEY = 'sela_panel_rail';
+function applyRail(on) {
+  document.body.classList.toggle('rail', on);
+  $('#sidebarHandle').setAttribute('aria-label', on ? 'فتح القائمة' : 'طي القائمة');
+  try { localStorage.setItem(RAIL_KEY, on ? '1' : '0'); } catch (_) {}
+}
+(function () {
+  let saved = null;
+  try { saved = localStorage.getItem(RAIL_KEY); } catch (_) {}
+  if (saved === '1') applyRail(true);
+})();
+if ($('#sidebarHandle')) {
+  $('#sidebarHandle').addEventListener('click', () => {
+    applyRail(!document.body.classList.contains('rail'));
+  });
+}
+/* tooltips for rail mode */
+$$('.nav-item').forEach((n) => {
+  const lbl = n.querySelector('.nav-label');
+  if (lbl) n.title = lbl.textContent.trim();
+});
+
 /* ═══════════════════ charts (inline SVG) ═══════════════════ */
 
-function svgBarChart(items, opts) {
-  // items: [{label, value}] — horizontal RTL bar chart
-  const o = opts || {};
+function htmlBarChart(items) {
+  // items: [{label, value, display}] — RTL HTML/CSS bars: real text at every size.
+  if (!items || !items.length) return '<div class="empty">لا بيانات بعد</div>';
   const max = Math.max(1, ...items.map((i) => i.value));
-  const barH = 26, gap = 10;
-  const h = items.length * (barH + gap) + 6;
-  const labelW = 86, valueW = 74;
-  const chartW = 640;
-  const rows = items.map((it, i) => {
-    const y = i * (barH + gap) + 3;
-    const w = Math.max(2, (it.value / max) * (chartW - labelW - valueW - 24));
-    const cx = chartW - valueW;
-    return (
-      '<g>' +
-      '<text x="' + (chartW - 4) + '" y="' + (y + barH / 2 + 4) +
-      '" text-anchor="end" font-size="11" fill="#84849a">' + esc(it.label) + '</text>' +
-      '<rect x="' + (cx - w) + '" y="' + y + '" width="' + w + '" height="' + barH +
-      '" rx="6" fill="url(#ograd)"/>' +
-      '<text x="' + (cx - w - 8) + '" y="' + (y + barH / 2 + 4) +
-      '" text-anchor="end" font-size="11.5" font-weight="700" fill="#fb923c">' +
-      esc(it.display !== undefined ? it.display : String(it.value)) + '</text>' +
-      '</g>'
-    );
-  }).join('');
-  return (
-    '<div class="chart-box"><svg class="chart-svg" viewBox="0 0 ' + chartW + ' ' + h +
-    '" preserveAspectRatio="xMidYMid meet">' +
-    '<defs><linearGradient id="ograd" x1="0" y1="0" x2="1" y2="0">' +
-    '<stop offset="0" stop-color="#c2410c"/><stop offset="1" stop-color="#f97316"/>' +
-    '</linearGradient></defs>' + rows + '</svg></div>'
-  );
+  const rows = items
+    .map((it) => {
+      const pct = Math.max(2, Math.round((it.value / max) * 100));
+      return (
+        '<div class="hb-row">' +
+        '<span class="hb-label">' + esc(it.label) + '</span>' +
+        '<span class="hb-track"><span class="hb-bar" style="width:' + pct + '%"></span></span>' +
+        '<b class="hb-val">' + esc(it.display !== undefined ? it.display : String(it.value)) + '</b>' +
+        '</div>'
+      );
+    })
+    .join('');
+  return '<div class="hb-chart">' + rows + '</div>';
 }
 
-function svgAreaChart(points, opts) {
-  // points: [{d, n}] — daily line/area, RTL not needed (dates ltr)
-  const o = opts || {};
-  const w = 640, h = 170, padB = 26, padT = 14;
-  if (!points.length) return '<div class="empty">لا بيانات</div>';
+function svgAreaChart(points) {
+  // points: [{d, n}] — daily activations; no in-SVG text (stays readable via HTML).
+  if (!points || !points.length) return '<div class="empty">لا بيانات بعد</div>';
+  const w = 640, h = 250, padB = 16, padT = 18;
   const max = Math.max(1, ...points.map((p) => p.n));
   const step = (w - 16) / Math.max(1, points.length - 1);
   const x = (i) => w - 8 - i * step; // RTL: oldest at right
   const y = (v) => padT + (1 - v / max) * (h - padB - padT);
 
-  let path = '', area = '';
+  let path = '';
   points.forEach((p, i) => {
-    const px = x(i), py = y(p.n);
-    path += (i === 0 ? 'M' : 'L') + px.toFixed(1) + ' ' + py.toFixed(1) + ' ';
+    path += (i === 0 ? 'M' : 'L') + x(i).toFixed(1) + ' ' + y(p.n).toFixed(1) + ' ';
   });
-  area = path + 'L' + x(points.length - 1).toFixed(1) + ' ' + (h - padB) +
+  const area =
+    path + 'L' + x(points.length - 1).toFixed(1) + ' ' + (h - padB) +
     ' L' + x(0).toFixed(1) + ' ' + (h - padB) + ' Z';
 
-  // x labels: every ~7 days
-  let labels = '';
-  points.forEach((p, i) => {
-    if (i % 7 === 0 || i === points.length - 1) {
-      labels += '<text x="' + x(i).toFixed(1) + '" y="' + (h - 8) +
-        '" text-anchor="middle" font-size="9.5" fill="#84849a">' +
-        esc(String(p.d).slice(5)) + '</text>';
-    }
-  });
+  // 3 dashed gridlines at 25 / 50 / 75% of the max.
+  let grid = '';
+  for (const f of [0.25, 0.5, 0.75]) {
+    const gy = y(max * f).toFixed(1);
+    grid +=
+      '<line x1="8" y1="' + gy + '" x2="' + (w - 8) + '" y2="' + gy +
+      '" stroke="rgba(255,255,255,0.05)" stroke-dasharray="4 5"/>';
+  }
+  const baseline = '<line x1="8" y1="' + (h - padB) + '" x2="' + (w - 8) + '" y2="' + (h - padB) + '" stroke="rgba(255,255,255,0.12)"/>';
+
+  const first = String(points[0].d);
+  const mid = String(points[Math.floor((points.length - 1) / 2)].d);
+  const last = String(points[points.length - 1].d);
+  const mmdd = (s) => (s.length >= 10 ? s.slice(5) : s);
 
   return (
-    '<div class="chart-box"><svg class="chart-svg" viewBox="0 0 ' + w + ' ' + h + '">' +
+    '<div class="area-chart">' +
+    '<div class="chart-topline"><span class="dim">الذروة</span><b>' + esc(String(max)) + '</b></div>' +
+    '<svg class="chart-svg" viewBox="0 0 ' + w + ' ' + h + '" preserveAspectRatio="xMidYMid meet">' +
     '<defs><linearGradient id="agrad" x1="0" y1="0" x2="0" y2="1">' +
-    '<stop offset="0" stop-color="rgba(249,115,22,0.4)"/><stop offset="1" stop-color="rgba(249,115,22,0.02)"/>' +
+    '<stop offset="0" stop-color="rgba(249,115,22,0.38)"/><stop offset="1" stop-color="rgba(249,115,22,0.02)"/>' +
     '</linearGradient></defs>' +
+    grid +
     '<path d="' + area + '" fill="url(#agrad)"/>' +
-    '<path d="' + path + '" fill="none" stroke="#f97316" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"/>' +
-    labels + '</svg></div>'
+    '<path d="' + path + '" fill="none" stroke="#f97316" stroke-width="2.6" stroke-linejoin="round" stroke-linecap="round"/>' +
+    baseline +
+    '</svg>' +
+    '<div class="axis-range"><span>' + esc(mmdd(first)) + '</span><span>' + esc(mmdd(mid)) + '</span><span>' + esc(mmdd(last)) + '</span></div>' +
+    '</div>'
   );
 }
 
@@ -408,7 +446,7 @@ async function viewDashboard() {
     '<div class="card"><div class="card-title">' +
     '<svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><path d="M3 3v18h18"/><path d="M7 14l4-4 3 3 5-6"/></svg>' +
     'الإيرادات الشهرية</div>' +
-    (revItems.length ? svgBarChart(revItems) : '<div class="empty">لا مدفوعات بعد</div>') +
+    (revItems.length ? htmlBarChart(revItems) : '<div class="empty">لا مدفوعات بعد</div>') +
     '</div>' +
     '<div class="card"><div class="card-title">' +
     '<svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><path d="M12 8v4l2.5 2.5"/><circle cx="12" cy="12" r="9"/></svg>' +
