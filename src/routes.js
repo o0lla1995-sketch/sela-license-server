@@ -34,6 +34,15 @@ function contactPayload() {
   };
 }
 
+/** v3.3 — رابط التفعيل الجديد (إن ضبطته الإدارة من اللوحة).
+ *  يُرفق مع كل رد للتطبيق (تفعيل/نبضة/إعدادات) فيتبناه الجهاز
+ *  تلقائياً بلا أي تدخل المستخدم — حقل العنوان نفسه أُخفي من
+ *  واجهة التطبيق تماماً. فارغ = لا تغيير. */
+function activationUrlPayload() {
+  const url = String(getSetting('activation_url', '') || '').trim();
+  return url.length > 0 ? {activationUrl: url} : {};
+}
+
 function buildRouter() {
   const router = express.Router();
 
@@ -62,6 +71,7 @@ function buildRouter() {
     res.json({
       ok: true,
       contact: contactPayload(),
+      ...activationUrlPayload(),
       currency,
       plans: [
         {id: 'trial', days: 7, label: 'تجريبي', price: Number(getSetting('price_trial', '0'))},
@@ -191,6 +201,7 @@ function buildRouter() {
       // v2: بداية الخطة من الخادم — أول تفعيل للمفتاح EVER.
       planStartedAt: keyWithPlan.first_activated_at ?? binding.activated_at,
       contact: contactPayload(),
+      ...activationUrlPayload(),
     });
   });
 
@@ -225,6 +236,7 @@ function buildRouter() {
         serverTime: now,
         expiresAt: payload.expiresAt,
         contact: contactPayload(),
+        ...activationUrlPayload(),
       });
     }
 
@@ -243,6 +255,7 @@ function buildRouter() {
         serverTime: now,
         expiresAt: binding.expires_at,
         contact: contactPayload(),
+        ...activationUrlPayload(),
       });
     }
 
@@ -254,6 +267,7 @@ function buildRouter() {
         serverTime: now,
         expiresAt: binding.expires_at,
         contact: contactPayload(),
+        ...activationUrlPayload(),
       });
     }
 
@@ -290,6 +304,7 @@ function buildRouter() {
         serverTime: now,
         expiresAt: binding.expires_at,
         contact: contactPayload(),
+        ...activationUrlPayload(),
         ...signed,
       });
     }
@@ -300,6 +315,7 @@ function buildRouter() {
       serverTime: now,
       expiresAt: binding.expires_at,
       contact: contactPayload(),
+      ...activationUrlPayload(),
     });
   });
 

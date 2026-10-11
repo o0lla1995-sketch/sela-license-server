@@ -35,6 +35,11 @@ const {
   seedOwnerFromEnv,
 } = require('./auth');
 const {buildSiteAdminRouter, sitePublicPayload, serveMedia} = require('./site');
+const {
+  buildStoreRouter,
+  buildMarketRouter,
+  buildMarketAdminRouter,
+} = require('./market');
 const {getSetting, setSetting} = require('./db');
 
 const app = express();
@@ -83,9 +88,12 @@ function resolveAdminPath() {
 const ADMIN_PATH = resolveAdminPath();
 
 // ── body parsers: big limit only for screenshot uploads ───────────
+// ── body parsers: big limit only for screenshot uploads ───────
 const jsonBig = express.json({limit: '14mb'});
 const jsonSmall = express.json({limit: '64kb'});
 app.use('/api/admin/media', jsonBig); // base64 screenshots land here
+// v4: مزامنة كتالوج المتجر — كتالوج كامل بضغطة واحدة (حد سخي 8mb)
+app.use('/api/v1/store', express.json({limit: '8mb'}));
 app.use('/api', jsonSmall);
 
 // Security headers for the panel.
@@ -150,6 +158,10 @@ const staticHeaders = (res, filePath) => {
 // ── 1) license API used by the Android app ────────────────────────
 app.use('/api/v1', buildRouter());
 
+// ── 1b) v4: merchant store API (نقطة البيع) + public market API (المتجر)
+app.use('/api/v1/store', buildStoreRouter());
+app.use('/api/market', buildMarketRouter());
+
 // ── 2) public site data (landing + contact) ───────────────────────
 app.get('/api/public/site', (_req, res) => {
   res.json(sitePublicPayload());
@@ -161,6 +173,7 @@ app.use('/api/admin/auth', buildAuthRouter(requireAdmin)); // /login is open ins
 app.use('/api/admin', requireAdmin, buildAdminRouter());
 app.use('/api/admin', requireAdmin, buildAdminUsersRouter());
 app.use('/api/admin', requireAdmin, buildSiteAdminRouter());
+app.use('/api/admin/market', requireAdmin, buildMarketAdminRouter());
 
 // ── 4) uploaded screenshots (public) ──────────────────────────────
 app.get('/media/:filename', serveMedia);

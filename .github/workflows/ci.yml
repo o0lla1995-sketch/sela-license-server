@@ -1,0 +1,36 @@
+name: license-server CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: License + Market API tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci || npm install
+
+      - name: Syntax check
+        run: |
+          node --check src/server.js
+          node --check src/market.js
+          node --check src/admin.js
+          node --check src/routes.js
+          node --check src/db.js
+          node --check src/panel/app.js
+
+      - name: License server end-to-end (v2/v3 flows)
+        run: node test-local.js
+
+      - name: Market platform end-to-end (v4 — البيع أونلاين)
+        run: node test-market.js

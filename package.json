@@ -1,11 +1,14 @@
 {
   "name": "sela-license-server",
-  "version": "1.0.0",
+  "version": "4.0.0",
   "description": "License / subscription activation server for the sela POS Android app — Coolify-ready (Docker).",
   "main": "src/server.js",
   "type": "commonjs",
   "scripts": {
-    "start": "node src/server.js"
+    "start": "node src/server.js",
+    "test": "node test-local.js && node test-market.js",
+    "test:license": "node test-local.js",
+    "test:market": "node test-market.js"
   },
   "engines": {
     "node": ">=20"

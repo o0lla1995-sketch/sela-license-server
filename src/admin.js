@@ -436,6 +436,11 @@ function buildAdminRouter() {
       ok: true,
       contact: contactPayload(),
       currency: getSetting('currency', '₪'),
+      // v3.3: رابط سيرفر التفعيل الذي سيتجه إليه التطبيق — يوزّع
+      // على كل الأجهزة عبر النبضة/التفعيل لتوجيهها للخادم الجديد
+      // عند نقل النشر (Coolify/نطاق جديد). فارغ = التطبيق يبقى على
+      // عنوانه الحالي.
+      activationUrl: getSetting('activation_url', ''),
       pricing: {
         trial: Number(getSetting('price_trial', '0')),
         monthly: Number(getSetting('price_monthly', '50')),
@@ -446,7 +451,7 @@ function buildAdminRouter() {
   });
 
   router.put('/config', (req, res) => {
-    const {phone, whatsapp, telegram, email, note, currency, pricing} =
+    const {phone, whatsapp, telegram, email, note, currency, pricing, activationUrl} =
       req.body || {};
 
     if (typeof phone === 'string') setSetting('contact_phone', phone.trim());
@@ -457,6 +462,34 @@ function buildAdminRouter() {
     if (typeof currency === 'string' && currency.trim()) {
       setSetting('currency', currency.trim().slice(0, 6));
     }
+    // v3.3: رابط التفعيل — نص فارغ يمسحه (الأجهزة تبقى على
+    // عناوينها)، وإلا يجب أن يكون http(s) صالحاً. تحذير: الخادم
+    // الجديد يجب أن يشارك نفس قاعدة البيانات ونفس مفتاح التوقيع
+    // وإلا ستُرفض التراخيص.
+    if (activationUrl !== undefined) {
+      const url = String(activationUrl || '').trim().replace(/\/+$/, '');
+      if (url === '') {
+        setSetting('activation_url', '');
+      } else {
+        let ok = false;
+        try {
+          const u = new URL(url);
+          ok = (u.protocol === 'http:' || u.protocol === 'https:') &&
+            u.hostname.length > 3 && url.length <= 200;
+        } catch (_e) {
+          ok = false;
+        }
+        if (!ok) {
+          return res.status(400).json({ok: false, error: 'BAD_ACTIVATION_URL'});
+        }
+        setSetting('activation_url', url);
+      }
+      audit('admin_update_activation_url', {
+        adminId: req.adminUser.id,
+        ip: req.ip,
+        details: {url: String(activationUrl || '').trim()},
+      });
+    }
     if (pricing && typeof pricing === 'object') {
       for (const k of ['trial', 'monthly', 'quarterly', 'yearly']) {
         if (pricing[k] !== undefined && Number.isFinite(Number(pricing[k]))) {
@@ -465,7 +498,11 @@ function buildAdminRouter() {
       }
     }
     audit('admin_update_config', {adminId: req.adminUser.id, ip: req.ip});
-    res.json({ok: true, contact: contactPayload()});
+    res.json({
+      ok: true,
+      contact: contactPayload(),
+      activationUrl: getSetting('activation_url', ''),
+    });
   });
 
   return router;

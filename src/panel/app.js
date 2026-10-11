@@ -51,6 +51,55 @@ function toast(msg, type) {
   toastTimer = setTimeout(() => { t.className = 'toast'; }, 2600);
 }
 
+/* v3.3 — نسخ عام يعمل في كل السياقات:
+ * navigator.clipboard متاح فقط في السياقات الآمنة (HTTPS) — واللوحة
+ * تعمل غالباً عبر http:// على نطاق sslip.io بلا شهادة، فكان زر
+ * «نسخ» ميتاً تماماً (undefined.writeText). هذا البديل يجرّب الـ
+ * API الحديث ثم يسقط إلى textarea + execCommand('copy') الذي
+ * يعمل في HTTP وفي متصفحات WebView القديمة أيضاً. */
+function copyText(text) {
+  return new Promise((resolve, reject) => {
+    const s = String(text == null ? '' : text);
+    const modern = () => {
+      if (navigator.clipboard && navigator.clipboard.writeText && window.isSecureContext) {
+        navigator.clipboard.writeText(s).then(resolve, () => legacy());
+      } else {
+        legacy();
+      }
+    };
+    const legacy = () => {
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = s;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.top = '0';
+        ta.style.left = '0';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        ta.setSelectionRange(0, s.length);
+        const ok = document.execCommand('copy');
+        document.body.removeChild(ta);
+        if (ok) { resolve(); } else { reject(new Error('copy failed')); }
+      } catch (e) {
+        reject(e);
+      }
+    };
+    modern();
+  });
+}
+function bindCopy(buttons, successMsg) {
+  buttons.forEach((b) => {
+    b.onclick = () => {
+      copyText(b.getAttribute('data-copy'))
+        .then(() => toast(successMsg || 'تم النسخ', 'success'))
+        .catch(() => toast('تعذر النسخ — انسخه يدوياً', 'error'));
+    };
+  });
+}
+
 function showModal(html, wide) {
   $('#modalBox').className = 'modal' + (wide ? ' wide' : '');
   $('#modalBox').innerHTML = html;
@@ -229,6 +278,7 @@ const VIEWS = {
   dashboard: {title: 'لوحة المعلومات', fn: viewDashboard},
   keys: {title: 'مفاتيح التفعيل', fn: viewKeys},
   payments: {title: 'المدفوعات', fn: viewPayments},
+  market: {title: 'المتاجر والطلبات', fn: viewMarket},
   landing: {title: 'صفحة الهبوط', fn: viewLanding},
   contact: {title: 'التواصل', fn: viewContact},
   admins: {title: 'المشرفون', fn: viewAdmins},
@@ -636,13 +686,9 @@ async function viewKeys() {
   $$('#view [data-kid]').forEach((b) => {
     b.onclick = () => openKeyDetail(Number(b.getAttribute('data-kid')));
   });
-  $$('#view [data-copy]').forEach((b) => {
-    b.onclick = () => {
-      navigator.clipboard.writeText(b.getAttribute('data-copy'))
-        .then(() => toast('تم نسخ المفتاح', 'success'))
-        .catch(() => toast('تعذر النسخ', 'error'));
-    };
-  });
+  // v3.3: نسخ عام (clipboard API + execCommand fallback) — كان الزر
+  // لا يعمل إطلاقاً على http (سياق غير آمن).
+  bindCopy($$('#view [data-copy]'), 'تم نسخ المفتاح');
 }
 
 function showErr(err) {
@@ -710,9 +756,9 @@ function showKeysCreated(list) {
   );
   $('#kcClose').onclick = closeModal;
   $('#kcCopy').onclick = () => {
-    navigator.clipboard.writeText(list)
+    copyText(list)
       .then(() => toast('تم النسخ', 'success'))
-      .catch(() => toast('تعذر النسخ', 'error'));
+      .catch(() => toast('تعذر النسخ — انسخه يدوياً', 'error'));
   };
 }
 
@@ -743,6 +789,7 @@ async function openKeyDetail(id) {
 
   showModal(
     '<h3>مفتاح: <span class="mono" style="direction:ltr">' + esc(k.key_plain) + '</span>' +
+    '<button class="copy-key" style="margin-inline-start:8px" data-copy="' + esc(k.key_plain) + '">نسخ</button>' +
     '<button class="m-close" id="kdClose">✕</button></h3>' +
 
     '<div class="kd-meta">' +
@@ -777,6 +824,8 @@ async function openKeyDetail(id) {
   );
 
   $('#kdClose').onclick = closeModal;
+  // v3.3: نسخ المفتاح من داخل نافذة التفاصيل أيضاً.
+  bindCopy($$('#modalBox [data-copy]'), 'تم نسخ المفتاح');
 
   $('#kdExtend').onclick = () => openExtendModal(id, k);
   $('#kdPay').onclick = () => openPayModal(id, k, data.paidSum);
@@ -1620,6 +1669,119 @@ async function viewAudit() {
   };
 }
 
+/* ═══════════════════ VIEW: market (المتاجر والطلبات) ═══════════════════ */
+
+const MARKET_STATUS_LABELS = {
+  new: ['جديد', 'amber'],
+  accepted: ['مقبول', 'amber'],
+  sent: ['مُرسل', 'amber'],
+  delivered: ['مُسلّم', 'green'],
+  rejected: ['مرفوض', 'red'],
+  cancelled: ['ملغي', 'red'],
+  returned: ['مُرجع', 'red'],
+};
+
+async function viewMarket() {
+  const [stats, stores] = await Promise.all([
+    api('/market/stats'),
+    api('/market/stores'),
+  ]);
+
+  const kpi = (label, value, cls) =>
+    '<div class="kpi' + (cls ? ' ' + cls : '') + '"><div class="k-label">' + esc(label) +
+    '</div><div class="k-value">' + esc(value) + '</div></div>';
+
+  const storeRows = (stores.stores || []).map((s) =>
+    '<tr>' +
+    '<td><b>' + esc(s.name) + '</b><br><span class="dim tiny mono" dir="ltr">' + esc(s.store_number) + '</span></td>' +
+    '<td><span class="mono tiny" dir="ltr">' + esc(s.key_plain || '') + '</span></td>' +
+    '<td>' + (s.published
+      ? '<span class="badge green">منشور</span>'
+      : '<span class="badge">مخفي</span>') + '</td>' +
+    '<td>' + (s.subscriptionActive
+      ? '<span class="badge green">فعّال</span>'
+      : '<span class="badge red">منتهي</span>') + '</td>' +
+    '<td class="num">' + s.products_count + '</td>' +
+    '<td class="num">' + s.orders_count +
+      (s.new_orders > 0 ? ' <span class="badge amber">' + s.new_orders + ' جديد</span>' : '') + '</td>' +
+    '<td class="dim tiny">' + esc(fmtDate(s.updated_at)) + '</td>' +
+    '<td class="actions">' +
+    '<button class="btn ghost small" data-morders="' + s.id + '">الطلبات</button> ' +
+    (s.published
+      ? '<button class="btn danger small" data-munpublish="' + s.id + '">إخفاء</button>'
+      : (s.subscriptionActive
+        ? '<button class="btn success small" data-mpublish="' + s.id + '">نشر</button>'
+        : '')) +
+    '</td></tr>'
+  ).join('');
+
+  $('#view').innerHTML =
+    '<div class="page-head"><div><h1>المتاجر والطلبات (البيع أونلاين)</h1>' +
+    '<div class="sub">متجار نقاط البيع المرتبطة بمنصة سيلا ماركت</div></div></div>' +
+
+    '<div class="card" style="padding:14px"><div class="kpis">' +
+    kpi('متاجر مسجلة', String(stats.stores || 0)) +
+    kpi('متاجر منشورة', String(stats.publishedStores || 0), 'green') +
+    kpi('منتجات معروضة', String(stats.products || 0)) +
+    kpi('مستخدمو المتجر', String(stats.users || 0)) +
+    kpi('إجمالي الطلبات', String(stats.orders || 0)) +
+    kpi('طلبات جديدة', String(stats.newOrders || 0), 'amber') +
+    kpi('طلبات مُسلّمة', String(stats.deliveredOrders || 0), 'green') +
+    kpi('قيمة البضاعة المبيعة', fmtMoney((stats.gmvMinor || 0) / 100)) +
+    '</div></div>' +
+
+    '<div class="card">' +
+    ((stores.stores || []).length
+      ? '<div class="table-wrap"><table class="tbl"><thead><tr>' +
+        '<th>المتجر</th><th>المفتاح</th><th>النشر</th><th>الاشتراك</th><th>منتجات</th>' +
+        '<th>طلبات</th><th>آخر تحديث</th><th></th>' +
+        '</tr></thead><tbody>' + storeRows + '</tbody></table></div>'
+      : '<div class="empty">لا متاجر بعد — تُنشأ تلقائياً عندما يفعّل التاجر «البيع أونلاين» من تطبيق نقطة البيع</div>') +
+    '</div>' +
+
+    '<div class="card"><div class="card-title">آخر الطلبات</div>' +
+    '<div id="marketOrdersBox"><div class="empty">اختر «الطلبات» من جدول المتاجر</div></div></div>';
+
+  $$('[data-munpublish]').forEach((b) => {
+    b.onclick = () =>
+      confirmModal('إخفاء المتجر', 'ستختفي منتجات المتجر من تطبيق المستخدمين فوراً. المتجر نفسه بياناته محفوظة.', 'إخفاء', async () => {
+        await api('/market/stores/' + b.getAttribute('data-munpublish') + '/publish',
+          {method: 'POST', body: {published: false}});
+        toast('تم إخفاء المتجر', 'success');
+        viewMarket().catch(showErr);
+      });
+  });
+  $$('[data-mpublish]').forEach((b) => {
+    b.onclick = async () => {
+      try {
+        await api('/market/stores/' + b.getAttribute('data-mpublish') + '/publish',
+          {method: 'POST', body: {published: true}});
+        toast('تم نشر المتجر', 'success');
+        viewMarket().catch(showErr);
+      } catch (err) { showErr(err); }
+    };
+  });
+  $$('[data-morders]').forEach((b) => {
+    b.onclick = () => loadMarketOrders(Number(b.getAttribute('data-morders'))).catch(showErr);
+  });
+}
+
+async function loadMarketOrders(storeId) {
+  const data = await api('/market/orders' + (storeId ? '?storeId=' + storeId : ''));
+  const rows = (data.orders || []).slice(0, 50).map((o) => {
+    const st = MARKET_STATUS_LABELS[o.status] || [o.status, ''];
+    return '<div class="tl-row">' +
+      '<span class="tl-time">' + esc(fmtDateTime(o.created_at)) + '</span>' +
+      '<span class="tl-event">' + esc(o.order_number) + '</span>' +
+      '<span class="badge ' + st[1] + '">' + st[0] + '</span>' +
+      '<span class="tl-detail">' + esc(o.user_name || '') + ' · ' + esc(o.user_phone || '') +
+      ' · ' + esc(o.store_name || '') + ' · ' + fmtMoney(o.total_minor / 100) +
+      (o.invoice_ref ? ' · <span class="mono" dir="ltr">' + esc(o.invoice_ref) + '</span>' : '') +
+      '</span></div>';
+  }).join('');
+  $('#marketOrdersBox').innerHTML = rows || '<div class="empty">لا طلبات لهذا المتجر</div>';
+}
+
 /* ═══════════════════ VIEW: settings ═══════════════════ */
 
 async function viewSettings() {
@@ -1660,6 +1822,16 @@ async function viewSettings() {
     '<button class="btn primary" id="stSave">حفظ الأسعار</button>' +
     '</div>' +
 
+    /* v3.3 — رابط سيرفر التفعيل للتطبيق */
+    '<div class="card"><div class="card-title">' +
+    '<svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><path d="M10 14L21 3"/><path d="M21 3l-4.5 1L21 8.5 22 3z" fill="currentColor" stroke="none"/><path d="M14 10l-3.5 3.5a2.5 2.5 0 0 1-3.5 0 2.5 2.5 0 0 1 0-3.5L10.5 7"/></svg>' +
+    'رابط سيرفر التفعيل (توجيه التطبيق)</div>' +
+    '<p class="dim tiny mb">عند نقل الخادم إلى نطاق/عنوان جديد: اكتب الرابط الجديد هنا — كل جهاز يتصل بهذا الخادم (تفعيل أو نبضة التحقق) سيتحول إليه <b>تلقائياً وخلال ساعة كحد أقصى</b>، وبدون ظهور أي حقل للمستخدم في التطبيق.</p>' +
+    '<div class="flex"><input class="input grow" id="stActivationUrl" dir="ltr" placeholder="https://example.com" maxlength="200" value="' + esc(cfg.activationUrl || '') + '">' +
+    '<button class="btn primary" id="stSaveUrl">حفظ الرابط</button></div>' +
+    '<p class="dim tiny mt">ملاحظات مهمة: <b>الخادم الجديد يجب أن يستخدم نفس قاعدة البيانات ونفس مفتاح التوقيع</b> حتى لا تُرفض التراخيص. أبقِ هذا الخادم القديم يعمل حتى تنتقل الأجهزة كلها (يظهر العداد في لوحة المعلومات)، ثم يمكنك إخلاء الحقل لتفريغه.</p>' +
+    '</div>' +
+
     '<div class="card"><div class="card-title">' +
     '<svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>' +
     'تغيير كلمة المرور</div>' +
@@ -1673,9 +1845,9 @@ async function viewSettings() {
     '</div>';
 
   $('#copyPath').onclick = () => {
-    navigator.clipboard.writeText(location.origin + panelPath)
+    copyText(location.origin + panelPath)
       .then(() => toast('تم نسخ رابط اللوحة', 'success'))
-      .catch(() => toast('تعذر النسخ', 'error'));
+      .catch(() => toast('تعذر النسخ — انسخه يدوياً', 'error'));
   };
   $('#stSave').onclick = async () => {
     try {
@@ -1694,6 +1866,21 @@ async function viewSettings() {
       CURRENCY = $('#stCurrency').value || '₪';
       toast('تم حفظ الأسعار', 'success');
     } catch (err) { showErr(err); }
+  };
+  $('#stSaveUrl').onclick = async () => {
+    const val = $('#stActivationUrl').value.trim();
+    if (val !== '' && !/^https?:\/\/.+\..+/.test(val)) {
+      return toast('الرابط يجب أن يبدأ بـ http:// أو https:// ويحتوي نطاقاً صالحاً', 'error');
+    }
+    try {
+      await api('/config', {
+        method: 'PUT',
+        body: {activationUrl: val},
+      });
+      toast(val === '' ? 'تم تفريغ رابط التفعيل — الأجهزة تبقى على عناوينها' : 'تم حفظ رابط التفعيل — ستتبناه الأجهزة تلقائياً', 'success');
+    } catch (err) {
+      showErr(err.message === 'BAD_ACTIVATION_URL' ? 'رابط غير صالح' : err);
+    }
   };
   $('#pwSave').onclick = async () => {
     try {
