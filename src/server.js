@@ -46,6 +46,28 @@ const app = express();
 app.disable('x-powered-by');
 app.set('trust proxy', true); // Coolify reverse proxy → real client IPs.
 
+/* v4.7 — قتل سلسلة 304 من الجذر (السبب الموحّد لاختفاء المنتجات
+ * وتفشيل لوحة الإدارة):
+ *   1) Express يولّد ETag ضعيفاً افتراضياً على كل res.json()
+ *   2) بعض بروكسيات مزودي الجوال على HTTP الصريح تخزّن الرد ثم
+ *      تحوّل الطلبات التالية لشرطية (If-None-Match) وتمرر رد 304
+ *      الفارغ كما هو للعميل — التطبيق والمتصفح معاً — بدل دمجه
+ *      مع نسختهما المخزنة (سلوك الكاش السليم).
+ *   3) العميل يرى 304 بجسم فارغ: fetch/fetch-API يفشل في parse
+ *      JSON → قوائم فارغة → «لا منتجات» و«لا بيانات في اللوحة».
+ * إبطال ETag على مستوى التطبيق + no-store على كل /api/* يعني أن
+ * أي طبقة كاش في المسار لا تملك ما تعيد التحقق منه — لا 304 بعد
+ * اليوم من هذا الخادم. الأصول الثابتة (panel/site) تحتفظ بـ ETag
+ * عبر خيار express.static الصريح (إعادة تحقق رخيصة سليمة). */
+app.set('etag', false);
+
+/* كل ردود الواجهات لا تُخزَّن أبداً عند أي وسيط: البيانات حيّة
+ * (مخزون/أسعار/طلبات) وأحجامها صغيرة — لا معنى لكاشها أصلاً. */
+app.use('/api', (_req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store');
+  next();
+});
+
 // ── tiny env loader (avoids an extra dependency) ─────────────────
 // Loads .env next to package.json when present (local dev only).
 try {
@@ -186,7 +208,7 @@ app.use(
     res.setHeader('X-Robots-Tag', 'noindex, nofollow');
     next();
   },
-  express.static(PANEL_DIR, {setHeaders: staticHeaders}),
+  express.static(PANEL_DIR, {etag: true, setHeaders: staticHeaders}),
 );
 
 // ── 6) public marketing pages ─────────────────────────────────────
@@ -205,7 +227,7 @@ app.get('/contact', (_req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   res.sendFile(path.join(SITE_DIR, 'contact.html'));
 });
-app.use(express.static(SITE_DIR, {setHeaders: staticHeaders}));
+app.use(express.static(SITE_DIR, {etag: true, setHeaders: staticHeaders}));
 
 // ── 7) /api 404 (JSON) ────────────────────────────────────────────
 app.use('/api', (_req, res) => {

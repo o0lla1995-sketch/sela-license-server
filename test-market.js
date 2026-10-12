@@ -838,6 +838,44 @@ async function main() {
       buyerOrders.status === 200 && bo && bo.store && bo.store.logo_url != null,
       JSON.stringify(bo && bo.store));
 
+    /* ── v4.7: الإخفاء الإداري للمنتجات (يقاوم مزامنات POS) ── */
+    const beforeHide = await req('GET', '/api/market/stores/1/products');
+    const hideTarget = beforeHide.data.products[0];
+    const hideIt = await req('POST', `/api/admin/market/products/${hideTarget.id}/visibility`,
+      {token: 'root-master-token', body: {hidden: true}});
+    ok('admin hide product', hideIt.status === 200 && hideIt.data.ok);
+    const afterHide = await req('GET', '/api/market/stores/1/products');
+    ok('hidden product gone from market',
+      afterHide.status === 200 && !afterHide.data.products.some(p => p.id === hideTarget.id));
+    const resyncAll = await req('POST', '/api/v1/store/products/sync', {
+      body: {
+        ...auth,
+        products: [
+          {ref: '101', name: 'أرز أبو كاس 5كغ', category: 'بقالة', priceMinor: 3350, stock: 12},
+          {ref: '102', name: 'زيت دوار الشمس 1.5ل', category: 'بقالة', priceMinor: 1800, stock: 9},
+          {ref: '103', name: 'طماطم', category: 'خضار', priceMinor: 400, stock: 30, soldByWeight: true, unitLabel: 'كيلو'},
+          {ref: '104', name: 'تيشيرت قطن', category: 'ملابس', priceMinor: 5900, stock: 25,
+            options: [{name: 'المقاس', values: ['S', 'M', 'L', 'XL']}]},
+        ],
+      },
+    });
+    ok('pos re-sync after hide', resyncAll.status === 200);
+    const afterResync = await req('GET', '/api/market/stores/1/products');
+    ok('admin hide survives pos re-sync',
+      !afterResync.data.products.some(p => p.id === hideTarget.id));
+    const fullCard = await req('GET', '/api/admin/market/stores/1/full', {token: 'root-master-token'});
+    ok('full card lists hidden product with flag',
+      fullCard.data.products.some(p => p.id === hideTarget.id && p.admin_hidden === 1));
+    const showIt = await req('POST', `/api/admin/market/products/${hideTarget.id}/visibility`,
+      {token: 'root-master-token', body: {hidden: false}});
+    ok('admin show product', showIt.status === 200);
+    const afterShow = await req('GET', '/api/market/stores/1/products');
+    ok('shown product back in market',
+      afterShow.data.products.some(p => p.id === hideTarget.id));
+    const etagProbe = await fetch(BASE + '/api/market/stores', {headers: {'If-None-Match': 'W/"fake"'}});
+    ok('no etag on api responses (304 chain killed)',
+      etagProbe.status === 200 && etagProbe.headers.get('etag') == null);
+
 
   } finally {
     server.kill('SIGTERM');

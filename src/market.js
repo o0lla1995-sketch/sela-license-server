@@ -213,6 +213,17 @@ CREATE TABLE IF NOT EXISTS market_order_items (
   line_total_minor INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_order_items_order ON market_order_items(order_id);
+
+/* ── v4.7: قرارات الإدارة بإخفاء منتجات بعينها ───────────────
+ * إخفاء إداري دائم: مزامنة POS التالية ترفع available=1 لكل
+ * الكتالوج، لذا يُخزَّن القرار هنا ويُعاد تطبيقه بعد كل مزامنة
+ * (upsert → إعادة الإخفاء) — لا يعود منتج أخفته الإدارة إلا
+ * بقرار من الإدارة نفسها. */
+CREATE TABLE IF NOT EXISTS admin_hidden_products (
+  product_id INTEGER PRIMARY KEY REFERENCES store_products(id) ON DELETE CASCADE,
+  admin_id   INTEGER,
+  hidden_at  INTEGER NOT NULL
+);
 `);
 
 /* ── ترحيل v4.2: أعمدة كلمة المرور على نشر قائم (CREATE IF NOT
@@ -360,10 +371,25 @@ const m = {
      WHERE pi.product_id = ? ORDER BY pi.sort_order ASC, i.id ASC`),
   productByRef: db.prepare(
     'SELECT id FROM store_products WHERE store_id = ? AND product_ref = ?'),
+  storeProductAnyById: db.prepare('SELECT * FROM store_products WHERE id = ?'),
   orphanImages: db.prepare(
     `SELECT id, store_id, hash, ext FROM store_images
      WHERE store_id = ? AND id NOT IN (SELECT image_id FROM store_product_images)`),
   deleteImageRow: db.prepare('DELETE FROM store_images WHERE id = ?'),
+
+  /* v4.7: الإخفاء الإداري الدائم للمنتجات */
+  hideProduct: db.prepare(
+    `INSERT OR REPLACE INTO admin_hidden_products (product_id, admin_id, hidden_at) VALUES (?, ?, ?)`),
+  unhideProduct: db.prepare('DELETE FROM admin_hidden_products WHERE product_id = ?'),
+  isHiddenByAdmin: db.prepare(
+    'SELECT product_id FROM admin_hidden_products WHERE product_id = ?'),
+  reapplyAdminHides: db.prepare(
+    `UPDATE store_products SET available = 0
+     WHERE id IN (SELECT product_id FROM admin_hidden_products)`),
+  adminHiddenIdsOfStore: db.prepare(
+    `SELECT p.id AS id FROM store_products p
+     JOIN admin_hidden_products h ON h.product_id = p.id
+     WHERE p.store_id = ?`),
 
   publishedStores: db.prepare(
     `SELECT s.id, s.store_number, s.name, s.description, s.category, s.region, s.phone, s.whatsapp,
@@ -918,6 +944,10 @@ function buildStoreRouter() {
       }
       // المنتجات الغائبة عن هذه المزامنة → غير متاحة (لا حذف أبداً)
       m.markMissingUnavailable.run(now, auth.store.id, now);
+      // v4.7: قرارات إخفاء الإدارة تعود للتطبيق بعد كل مزامنة —
+      // الكتالوج يعود available=1 من upsert ثم تُطرد المنتجات
+      // المخفية إدارياً من العرض مجدداً داخل نفس المعاملة.
+      m.reapplyAdminHides.run();
     })();
     res.json({
       ok: true,
@@ -1170,12 +1200,13 @@ function buildMarketRouter() {
 
   const TOKEN_HEADER = 'x-market-token';
 
-  /* v4.4: منع أي وسيط شبكة من «تحويل» الردود (ضغط gzip عبر بوابة
-   * النشر أو بروكسيات مزودي الجوال على HTTP الصريح) — شبكات عربية
-   * عدة تُفسد الردود المضغوطة فيعمل طلب المتاجر الصغيرة ويفشل الأكبر.
+  /* v4.4→v4.7: منع أي وسيط شبكة من «تحويل» الردود (ضغط gzip عبر بوابة
+   * النشر أو بروكسيات مزودي الجوال على HTTP الصريح) + منع التخزين
+   * وإعادة التحقق نهائياً (no-store) — مع ETag معطّل على مستوى
+   * التطبيق لا يمكن أن يولّد هذا المسار 304 بعد اليوم.
    * التطبيق يطلب identity أيضاً — هذا الحزام الاحتياطي الثاني. */
   router.use((_req, res, next) => {
-    res.setHeader('Cache-Control', 'no-transform');
+    res.setHeader('Cache-Control', 'no-store, no-transform');
     next();
   });
 
@@ -1878,8 +1909,31 @@ function buildMarketAdminRouter() {
     res.json({ok: true});
   });
 
+  /* v4.7: إخفاء/إظهار منتج واحد من الإدارة — قرار دائم يقاوم
+   * مزامنات POS التالية (يُعاد تطبيقه بعد كل upsert). المتجر
+   * يراه في كتالوجه ولا يراه المشتري في المول. */
+  router.post('/products/:id/visibility', (req, res) => {
+    const id = Number(req.params.id);
+    const product = m.storeProductAnyById.get(id);
+    if (product == null) return res.status(404).json({ok: false, error: 'NOT_FOUND'});
+    const hidden = req.body?.hidden ? true : false;
+    const now = Date.now();
+    if (hidden) {
+      m.hideProduct.run(id, req.adminUser.id, now);
+      db.prepare('UPDATE store_products SET available = 0 WHERE id = ?').run(id);
+    } else {
+      m.unhideProduct.run(id);
+      db.prepare('UPDATE store_products SET available = 1 WHERE id = ?').run(id);
+    }
+    audit('admin_market_product_visibility', {adminId: req.adminUser.id, ip: req.ip,
+      details: {productId: id, storeId: product.store_id, hidden}});
+    res.json({ok: true});
+  });
+
   /* v4.5: بطاقة المتجر الكاملة — ملف + شعار + مناطق + كتالوج
-   * (بالخصومات والصور) + التقييمات + الطلبات الأخيرة. */
+   * (بالخصومات والصور) + التقييمات + الطلبات الأخيرة.
+   * v4.7: الكتالوج يعرض المعروض والمخفي إدارياً معاً (الإخفاء
+   * بقرار الإدارة لا يغيّر بيانات التاجر — قابل للتراجع). */
   router.get('/stores/:id/full', (req, res) => {
     const store = adminStore(req.params.id);
     if (!store) return res.status(404).json({ok: false, error: 'NOT_FOUND'});
@@ -1887,8 +1941,11 @@ function buildMarketAdminRouter() {
     const now = Date.now();
     const stats = m.ratingStatsStore.get(store.id);
     const products = db.prepare(
-      `SELECT * FROM store_products WHERE store_id = ? AND available = 1
-       ORDER BY name COLLATE NOCASE ASC LIMIT 500`,
+      `SELECT p.*, (h.product_id IS NOT NULL) AS admin_hidden
+       FROM store_products p
+       LEFT JOIN admin_hidden_products h ON h.product_id = p.id
+       WHERE p.store_id = ? AND (p.available = 1 OR h.product_id IS NOT NULL)
+       ORDER BY p.name COLLATE NOCASE ASC LIMIT 500`,
     ).all(store.id);
     res.json({
       ok: true,

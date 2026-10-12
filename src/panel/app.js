@@ -135,16 +135,34 @@ function confirmModal(title, msg, okLabel, onOk) {
 
 let TOKEN = localStorage.getItem('sela_panel_token') || '';
 
-async function api(path, opts) {
+/* v4.7 — مقاومة 304 من بروكسيات مزودي الجوال:
+ * بعض الشبكات على HTTP الصريح تخزّن رد GET ثم تحوّل الطلبات التالية
+ * لشرطية وتمرر 304 الفارغ للمتصفح (طلبٌ لم يطلب إعادة تحقق!) — المتصفح
+ * يعدها رداً معطوباً فتفشل كل الأقسام. العلاج: طلب no-cache دائماً،
+ * وعند وصول 304 رغم ذلك نعيد المحاولة مرة واحدة برابط فريد (كسر
+ * الكاش عند أي وسيط) — يجلب الرد الكامل من الأصل حتماً. */
+async function apiFetch(url, opts) {
   const o = opts || {};
-  const res = await fetch('/api/admin' + path, {
+  const init = {
     method: o.method || 'GET',
+    cache: 'no-store',
     headers: Object.assign(
-      {'Content-Type': 'application/json'},
+      {'Content-Type': 'application/json', 'Cache-Control': 'no-cache'},
       TOKEN ? {Authorization: 'Bearer ' + TOKEN} : {}
     ),
     body: o.body !== undefined ? JSON.stringify(o.body) : undefined,
-  });
+  };
+  let res = await fetch(url, init);
+  if (res.status === 304) {
+    const bust = url + (url.indexOf('?') >= 0 ? '&' : '?') + '_=' + Date.now();
+    res = await fetch(bust, init);
+  }
+  return res;
+}
+
+async function api(path, opts) {
+  const o = opts || {};
+  const res = await apiFetch('/api/admin' + path, o);
   let data = null;
   try { data = await res.json(); } catch (_) { data = null; }
 
@@ -235,13 +253,12 @@ $('#loginForm').addEventListener('submit', async (e) => {
   btn.disabled = true;
   btn.textContent = 'جارٍ التحقق…';
   try {
-    const res = await fetch('/api/admin/auth/login', {
+    const res = await apiFetch('/api/admin/auth/login', {
       method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({
+      body: {
         email: $('#loginEmail').value.trim(),
         password: $('#loginPass').value,
-      }),
+      },
     });
     const data = await res.json();
     if (!res.ok || !data.ok) throw new Error(data.error || 'LOGIN_FAILED');
@@ -1897,8 +1914,10 @@ async function openStoreFullModal(storeId) {
     const price = (Number(p.price_minor) || 0) / 100;
     const disc = Number(p.discount_pct) || 0;
     const final = disc > 0 ? price * (1 - disc / 100) : price;
-    return '<tr>' +
+    const hidden = p.admin_hidden === 1;
+    return '<tr' + (hidden ? ' style="opacity:.55"' : '') + '>' +
       '<td><b>' + esc(p.name) + '</b>' +
+      (hidden ? ' <span class="badge">مخفي من الإدارة</span>' : '') +
       (p.category ? '<br><span class="dim tiny">' + esc(p.category) + '</span>' : '') + '</td>' +
       '<td class="num">' + (disc > 0
         ? '<s class="dim">' + fmtMoney(price) + '</s> <b>' + fmtMoney(final) + '</b> <span class="badge orange">-' + disc + '%</span>'
@@ -1907,6 +1926,11 @@ async function openStoreFullModal(storeId) {
       '<td class="num">' + (p.images && p.images.length
         ? '<span class="badge blue">' + p.images.length + ' صورة</span>'
         : '<span class="dim tiny">بلا صور</span>') + '</td>' +
+      '<td class="actions">' +
+      (hidden
+        ? '<button class="btn success small" data-pshow="' + p.id + '">إظهار</button>'
+        : '<button class="btn ghost small" data-phide="' + p.id + '">إخفاء</button>') +
+      '</td>' +
       '</tr>';
   }).join('');
 
@@ -1928,7 +1952,7 @@ async function openStoreFullModal(storeId) {
   }).join('');
 
   const regions = (d.deliveryRegions || []).map((r) =>
-    '<span class="chip static">' + esc(r.region) +
+    '<span class="chip static">' + esc(r.name) +
     (r.fee_minor != null ? ' — ' + fmtMoney(r.fee_minor / 100) : '') + '</span>'
   ).join('');
 
@@ -1972,10 +1996,12 @@ async function openStoreFullModal(storeId) {
     '<div class="card-title" style="margin-top:18px">مناطق التوصيل</div>' +
     '<div class="chips">' + (regions || '<span class="dim tiny">لم يضف التاجر مناطق بعد</span>') + '</div>' +
 
-    '<div class="card-title" style="margin-top:18px">الكتالوج (' + products.length + ' منتجًا معروضًا)</div>' +
+    '<div class="card-title" style="margin-top:18px">الكتالوج (' + products.length + ' منتجًا)' +
+    (products.some((p) => p.admin_hidden === 1)
+      ? ' <span class="dim tiny">— المنتجات المخفية لا تظهر للمشترين في المول</span>' : '') + '</div>' +
     (products.length
       ? '<div class="table-wrap" style="max-height:300px;overflow:auto"><table class="tbl"><thead><tr>' +
-        '<th>المنتج</th><th>السعر</th><th>المخزون</th><th>الصور</th>' +
+        '<th>المنتج</th><th>السعر</th><th>المخزون</th><th>الصور</th><th>إجراء</th>' +
         '</tr></thead><tbody>' + productRows + '</tbody></table></div>'
       : '<div class="empty">لا منتجات معروضة — يضيفها التاجر من نقطة البيع</div>') +
 
@@ -1992,6 +2018,27 @@ async function openStoreFullModal(storeId) {
   );
 
   $('#sfClose').onclick = closeModal;
+
+  /* v4.7: إخفاء/إظهار منتج — قرار إداري دائم يقاوم مزامنات التاجر. */
+  $$('[data-phide]').forEach((b) => {
+    b.onclick = () =>
+      confirmModal('إخفاء المنتج', 'سيختفي هذا المنتج من متجر المشترين فورًا، وسيبقى مخفيًا حتى تقرر إظهاره من هنا (حتى لو أعاد التاجر مزامنة كتالوجه).', 'إخفاء', async () => {
+        await api('/market/products/' + b.getAttribute('data-phide') + '/visibility',
+          {method: 'POST', body: {hidden: true}});
+        toast('أُخفي المنتج من المول', 'success');
+        openStoreFullModal(storeId).catch(showErr);
+      });
+  });
+  $$('[data-pshow]').forEach((b) => {
+    b.onclick = async () => {
+      try {
+        await api('/market/products/' + b.getAttribute('data-pshow') + '/visibility',
+          {method: 'POST', body: {hidden: false}});
+        toast('أُعيد المنتج للعرض', 'success');
+        openStoreFullModal(storeId).catch(showErr);
+      } catch (err) { showErr(err); }
+    };
+  });
 
   $('#storeProfileForm').onsubmit = async (ev) => {
     ev.preventDefault();
