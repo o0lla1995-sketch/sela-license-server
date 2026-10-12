@@ -119,6 +119,48 @@ function downloadsPublic() {
   }));
 }
 
+/* ── v4.6: مزامنة رابط أحدث إصدار APK لتطبيق نقطة البيع ──────────
+ * رابط «تحميل APK» على صفحة الهبوط ظل يشير إلى v43 بينما الإصدار
+ * الحالي v50 — التحديث اليدوي من اللوحة لا يجري بانتظام مع كل إصدار.
+ * هذه المزامنة تعمل عند الإقلاع ثم يومياً: تجلب أحدث إصدار من GitHub
+ * وتحدّث رابط direct_apk فقط إذا كان يشير أصلاً إلى مستودع سيلا نفسه.
+ * الروابط المخصصة (مستودع/مضيف آخر) والروابط المعطّلة لا تُمس إطلاقاً،
+ * وفشل الوصول إلى GitHub يُتجاهل بصمت — لا يؤخر الإقلاع شيئاً. */
+const POS_RELEASES_LATEST = 'https://api.github.com/repos/o0lla1995-sketch/sela/releases/latest';
+const POS_OUR_ASSET_RE = /^https:\/\/github\.com\/o0lla1995-sketch\/sela\/releases\/download\//;
+
+async function syncLatestPosRelease() {
+  try {
+    // GITHUB_TOKEN اختياري: بلا حد 60 طلبًا/ساعة لكل IP — كافية تمامًا
+    // لإقلاع + مرة يومياً؛ والرمز يرفع الحد إذا رغب المشرف بضبطه.
+    const headers = {
+      'Accept': 'application/vnd.github+json',
+      'User-Agent': 'sela-license-server',
+    };
+    if (process.env.GITHUB_TOKEN) headers.Authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
+    const res = await fetch(POS_RELEASES_LATEST, {headers, signal: AbortSignal.timeout(8000)});
+    if (!res.ok) return;
+    const rel = await res.json();
+    const apk = (rel.assets || []).find(a => a && a.name && a.name.endsWith('.apk'));
+    if (!apk || !apk.browser_download_url) return;
+    const current = stmt.downloadLinkByPlatform.get('direct_apk');
+    if (!current || !current.enabled) return; // معطّل أو محذوف — احترام المشرف
+    const url = String(current.url || '');
+    if (!POS_OUR_ASSET_RE.test(url)) return; // رابط مخصص — احترام المشرف
+    if (url === apk.browser_download_url) return; // محدّث أصلاً
+    stmt.upsertDownloadLink.run(
+      'direct_apk', apk.browser_download_url, current.label, 1, current.sort_order, Date.now());
+    audit('site_download_sync', {details: {
+      platform: 'direct_apk', from: url, to: apk.browser_download_url}});
+    console.log('[site] download link synced →', apk.browser_download_url);
+  } catch (_) {
+    /* الوصول إلى GitHub اختياري — لا يكسر شيئاً */
+  }
+}
+
+syncLatestPosRelease();
+setInterval(() => { syncLatestPosRelease(); }, 24 * 3600 * 1000).unref();
+
 function mediaPublic() {
   return stmt.listMedia.all().map(m => ({
     id: m.id,
