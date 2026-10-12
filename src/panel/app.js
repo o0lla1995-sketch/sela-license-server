@@ -1833,7 +1833,17 @@ async function viewMarket() {
 
     '<div class="card"><div class="card-title">آخر الطلبات</div>' +
     '<div class="card-title hint">اختر «الطلبات» من جدول المتاجر لتظهر هنا</div>' +
-    '<div id="marketOrdersBox"><div class="empty">لا طلبات محمّلة</div></div></div>';
+    '<div id="marketOrdersBox"><div class="empty">لا طلبات محمّلة</div></div></div>' +
+
+    '<div class="card"><div class="card-title">سجل طلبات المول الحي</div>' +
+    '<div class="card-title hint">كل نداء يصله الخادم من تطبيق المستخدمين لحظة بلحظة — ' +
+    'من هنا تتحقق بعينك أن طلبات المنتجات تصل فعلاً (الحالة والحجم والزمن وعنوان العميل). ' +
+    'إن لم يظهر طلب «/products» هنا أثناء استخدام التطبيق فالطلب يُقتل في الطريق قبل الخادم.</div>' +
+    '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">' +
+    '<button class="btn small" id="mreqLoad">تحديث السجل</button>' +
+    '<button class="btn ghost small" id="mreqAuto">تشغيل التحديث التلقائي</button>' +
+    '<button class="btn ghost small" id="mreqReset">تصفير العدادات</button>' +
+    '</div><div id="marketReqBox"><div class="empty">اضغط «تحديث السجل»</div></div></div>';
 
   $$('[data-munpublish]').forEach((b) => {
     b.onclick = () =>
@@ -1860,6 +1870,90 @@ async function viewMarket() {
   $$('[data-mfull]').forEach((b) => {
     b.onclick = () => openStoreFullModal(Number(b.getAttribute('data-mfull'))).catch(showErr);
   });
+
+  /* v5.1: سجل طلبات المول — تحديث يدوي وتلقائي كل 5 ثوانٍ */
+  const reqLoadBtn = $('#mreqLoad');
+  const reqAutoBtn = $('#mreqAuto');
+  const reqResetBtn = $('#mreqReset');
+  if (reqLoadBtn) {
+    reqLoadBtn.onclick = () => loadMarketRequestLog().catch(showErr);
+    loadMarketRequestLog().catch(() => {});
+  }
+  if (reqAutoBtn) {
+    let autoTimer = null;
+    reqAutoBtn.onclick = () => {
+      if (autoTimer) {
+        clearInterval(autoTimer);
+        autoTimer = null;
+        reqAutoBtn.textContent = 'تشغيل التحديث التلقائي';
+        reqAutoBtn.classList.remove('success');
+      } else {
+        autoTimer = setInterval(() => loadMarketRequestLog().catch(() => {}), 5000);
+        reqAutoBtn.textContent = 'إيقاف التحديث التلقائي';
+        reqAutoBtn.classList.add('success');
+      }
+    };
+  }
+  if (reqResetBtn) {
+    reqResetBtn.onclick = () =>
+      confirmModal('تصفير العدادات', 'يُصفَّر عدّاد النداءات والأخطاء (السجل نفسه يبقى).', 'تصفير', async () => {
+        await api('/market/request-log/reset', {method: 'POST'});
+        toast('تم التصفير', 'success');
+        loadMarketRequestLog().catch(showErr);
+      });
+  }
+}
+
+/* ═════════ v5.1: سجل طلبات المول الحي ═══════════════════════════
+ * يعرض آخر 400 نداء /api/market/* وصلت للخادم — الدليل القاطع عند
+ * أي شكوى «المنتجات لا تظهر»: إن كان الطلب يصل ويرد 200 فالخلل في
+ * الطريق للعميل (شبكة المستخدم)، وإن لم يصل أصلاً فالتطبيق لم
+ * يرسله. يعرض أيضاً عدادات المنتجات تحديداً. */
+async function loadMarketRequestLog() {
+  const box = $('#marketReqBox');
+  if (!box) return;
+  const d = await api('/market/request-log');
+  const t = d.totals || {};
+  const list = d.entries || [];
+  const mins = Math.max(1, Math.round((Date.now() - (t.since || Date.now())) / 60000));
+
+  const summary =
+    '<div class="kpi-grid" style="margin-bottom:12px">' +
+    kpi('نداءات منذ التصفير', String(t.requests || 0),
+      'خلال ~' + mins + ' دقيقة') +
+    kpi('طلبات المنتجات', String(t.productsRequests || 0),
+      (t.productsErrors || 0) + ' فشل منها', (t.productsErrors || 0) > 0 ? 'warn' : 'green') +
+    kpi('أخطاء (4xx/5xx)', String(t.errors || 0),
+      (t.errors || 0) === 0 ? 'لا أخطاء' : 'راجع الأسفل', (t.errors || 0) > 0 ? 'warn' : 'green') +
+    '</div>';
+
+  if (!list.length) {
+    box.innerHTML = summary + '<div class="empty">لا نداءات مسجلة بعد على /api/market — افتح تطبيق المستخدمين ثم حدّث</div>';
+    return;
+  }
+
+  const rows = list.slice(0, 120).map((e) => {
+    const isProducts = e.path.indexOf('/products') !== -1;
+    const statusColor = e.ok ? 'var(--ok, #16a34a)' : 'var(--danger, #dc2626)';
+    return '<tr' + (isProducts ? ' style="background:rgba(249,115,22,.07)"' : '') + '>' +
+      '<td>' + esc(fmtDateTime(e.at)) + '</td>' +
+      '<td><b>' + esc(e.method) + '</b></td>' +
+      '<td dir="ltr" style="text-align:left;font-size:11.5px">' + esc(e.path) +
+      (isProducts ? ' <span style="color:#f97316;font-weight:700">منتجات</span>' : '') + '</td>' +
+      '<td style="color:' + statusColor + ';font-weight:700">' + e.status + '</td>' +
+      '<td>' + (e.bytes || '—') + '</td>' +
+      '<td>' + e.ms + 'ms</td>' +
+      '<td dir="ltr" style="text-align:left;font-size:11px">' + esc(e.ip) + '</td>' +
+      '<td dir="ltr" style="text-align:left;font-size:10.5px;color:#888">' + esc(String(e.ua || '').split(' ')[0] || '') + '</td>' +
+      '</tr>';
+  }).join('');
+
+  box.innerHTML = summary +
+    '<div class="card-title hint" style="margin-bottom:6px">آخر ' + Math.min(list.length, 120) +
+    ' نداء (الأحدث أولاً) — الصفوف البرتقالية طلبات منتجات · الجدول يتحدث تلقائياً عند التشغيل</div>' +
+    '<div class="table-wrap" style="max-height:420px;overflow:auto"><table class="tbl"><thead><tr>' +
+    '<th>الوقت</th><th>الطريقة</th><th>المسار</th><th>الحالة</th><th>بايت</th><th>الزمن</th><th>العميل</th><th>الوكيل</th>' +
+    '</tr></thead><tbody>' + rows + '</tbody></table></div>';
 }
 
 /* ═══════════════════ VIEW: market users (مستخدمو المتجر) ═══════════════════

@@ -40,6 +40,7 @@ const {
   buildMarketRouter,
   buildMarketAdminRouter,
 } = require('./market');
+const marketlog = require('./marketlog');
 const {getSetting, setSetting} = require('./db');
 
 const app = express();
@@ -182,6 +183,10 @@ const staticHeaders = (res, filePath) => {
 app.use('/api/v1', buildRouter());
 
 // ── 1b) v4: merchant store API (نقطة البيع) + public market API (المتجر)
+// v5.1: سجل طلبات المول الحي — كل نداء /api/market/* يُسجّل
+// (الحالة/الحجم/الزمن/العميل) ويُعرض في لوحة الإدارة كي يرى
+// المالك بعينه أن طلبات المنتجات تصل للخادم فعلاً.
+app.use('/api/market', marketlog.middleware);
 app.use('/api/v1/store', buildStoreRouter());
 app.use('/api/market', buildMarketRouter());
 
@@ -197,6 +202,15 @@ app.use('/api/admin', requireAdmin, buildAdminRouter());
 app.use('/api/admin', requireAdmin, buildAdminUsersRouter());
 app.use('/api/admin', requireAdmin, buildSiteAdminRouter());
 app.use('/api/admin/market', requireAdmin, buildMarketAdminRouter());
+
+// v5.1: سجل طلبات المول للوحة الإدارة (قراءة + تصفير)
+app.get('/api/admin/market/request-log', requireAdmin, (_req, res) => {
+  res.json({ok: true, ...marketlog.snapshot()});
+});
+app.post('/api/admin/market/request-log/reset', requireAdmin, (_req, res) => {
+  marketlog.reset();
+  res.json({ok: true});
+});
 
 // ── 4) uploaded screenshots (public) ──────────────────────────────
 app.get('/media/:filename', serveMedia);
