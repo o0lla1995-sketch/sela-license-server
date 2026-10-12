@@ -162,11 +162,27 @@ async function main() {
           {ref: '101', name: 'أرز أبو كاس 5كغ', category: 'بقالة', priceMinor: 3350, stock: 12},
           {ref: '102', name: 'زيت دوار الشمس 1.5ل', category: 'بقالة', priceMinor: 1800, stock: 9},
           {ref: '103', name: 'طماطم', category: 'خضار', priceMinor: 400, stock: 30, soldByWeight: true, unitLabel: 'كيلو'},
+          // v4.3: منتج بخيارات (مقاسات + لون)
+          {ref: '104', name: 'تيشيرت قطن', category: 'ملابس', priceMinor: 5900, stock: 25,
+            options: [
+              {name: 'المقاس', values: ['S', 'M', 'L', 'XL']},
+              {name: 'اللون', values: ['أسود', 'أبيض', 'كحلي']},
+            ]},
+          // خيارات فاسدة (قيم فارغة/بدون اسم) → تُهمل وتُخزّن null
+          {ref: '105', name: 'كاب أمير', category: 'ملابس', priceMinor: 2500, stock: 10,
+            options: [{name: '   ', values: ['واحد']}, {name: 'الحجم', values: ['  ', '']}]},
         ],
       },
     });
     prods = await req('GET', '/api/market/stores/1/products');
-    ok('product returns when re-synced', prods.data.products.length === 3);
+    ok('product returns when re-synced', prods.data.products.length === 5);
+    const tshirt = prods.data.products.find(p => p.name === 'تيشيرت قطن');
+    ok('product options stored + returned',
+      tshirt != null && Array.isArray(tshirt.options) && tshirt.options.length === 2 &&
+      tshirt.options[0].name === 'المقاس' && tshirt.options[0].values.length === 4 &&
+      tshirt.options[1].values[2] === 'كحلي');
+    const cap = prods.data.products.find(p => p.name === 'كاب أمير');
+    ok('invalid options normalized away', cap != null && cap.options == null);
 
     /* ── 3b) صور المنتجات (v4.2) ────────────────────────────── */
     // بناء WebP اصطيناعي صالح بصرياً للبصمة السحرية (RIFF....WEBP)
@@ -258,8 +274,11 @@ async function main() {
     const cats = await req('GET', '/api/market/categories');
     ok('categories aggregated', cats.data.ok && cats.data.categories.length >= 2);
     const cross = await req('GET', '/api/market/products');
-    ok('cross-store products', cross.data.ok && cross.data.products.length === 3 &&
+    ok('cross-store products', cross.data.ok && cross.data.products.length === 5 &&
       cross.data.products[0].store_name === 'سوبر ماركت النور ٢');
+    ok('cross-store products carry options',
+      cross.data.products.some(p => p.name === 'تيشيرت قطن' &&
+        p.options != null && p.options.length === 2));
     const search = await req('GET', '/api/market/stores/1/products?q=' + encodeURIComponent('أرز'));
     ok('product search', search.data.products.length === 1);
 
@@ -323,9 +342,17 @@ async function main() {
     ok('login after reset', ulog3.status === 200);
 
     /* ── 6) الطلب ──────────────────────────────────────────── */
+    // معرّفات المنتجات تُقرأ ديناميكياً — upsert ON CONFLICT يستهلك
+    // أرقام AUTOINCREMENT حتى على تعارض المفتاح، فلا يُعتمد على ثباتها.
+    const allProds = (await req('GET', '/api/market/stores/1/products')).data.products;
+    const riceId = allProds.find(p => p.product_ref === '101').id;
+    const tomatoId = allProds.find(p => p.product_ref === '103').id;
+    const tshirtId = allProds.find(p => p.product_ref === "104").id;
+    const oilId = allProds.find(p => p.product_ref === "102").id;
+
     const badRegion = await req('POST', '/api/market/orders', {
       marketToken: mtok2,
-      body: {storeId: 1, items: [{productId: 1, quantity: 2}], regionName: 'بلاد العجائب'},
+      body: {storeId: 1, items: [{productId: riceId, quantity: 2}], regionName: 'بلاد العجائب'},
     });
     ok('bad region rejected with region list', badRegion.status === 400 &&
       Array.isArray(badRegion.data.regions));
@@ -335,20 +362,25 @@ async function main() {
       body: {
         storeId: 1,
         items: [
-          {productId: 1, quantity: 2},   // أرز 33.50 × 2
-          {productId: 3, quantity: 1.5}, // طماطم 4.00 × 1.5
+          {productId: riceId, quantity: 2},   // أرز 33.50 × 2
+          {productId: tomatoId, quantity: 1.5}, // طماطم 4.00 × 1.5
+          // v4.3: منتج بخيارات مع لقطة الخيار المختار
+          {productId: tshirtId, quantity: 1, variant: 'المقاس: L · اللون: كحلي'},
         ],
         regionName: 'المركز',
         address: 'شارع الرئيسي، بناية 4',
         note: 'الاتصال قبل الوصول',
       },
     });
-    // 2×3350 + 1.5×400 + 1200 = 6700+600+1200 = 8500
+    // 2×3350 + 1.5×400 + 1×5900 + 1200 = 6700+600+5900+1200 = 14400
     ok('order placed (server-side pricing)',
-      order.status === 200 && order.data.order.items_total_minor === 7300 &&
+      order.status === 200 && order.data.order.items_total_minor === 13200 &&
       order.data.order.delivery_fee_minor === 1200 &&
-      order.data.order.total_minor === 8500 &&
+      order.data.order.total_minor === 14400 &&
       order.data.order.status === 'new');
+    ok('order item carries variant snapshot',
+      order.data.order.items.some(it =>
+        it.variant === 'المقاس: L · اللون: كحلي' && it.product_name === 'تيشيرت قطن'));
     const orderNumber = order.data.order.order_number;
 
     /* ── 7) POS: استطلاع + قبول + إرسال + تسليم ──────────── */
@@ -356,7 +388,8 @@ async function main() {
       {body: {...auth, since: 0}});
     ok('poll sees the order', poll.data.ok && poll.data.orders.length === 1 &&
       poll.data.orders[0].customer.phone === '0598765432' &&
-      poll.data.orders[0].items.length === 2);
+      poll.data.orders[0].items.length === 3 &&
+      poll.data.orders[0].items.some(it => it.variant === 'المقاس: L · اللون: كحلي'));
 
     const acc = await req('POST', '/api/v1/store/orders/action',
       {body: {...auth, orderNumber, action: 'accept'}});
@@ -386,7 +419,7 @@ async function main() {
     /* ── 9) إلغاء المستخدم ─────────────────────────────────── */
     const order2 = await req('POST', '/api/market/orders', {
       marketToken: mtok2,
-      body: {storeId: 1, items: [{productId: 2, quantity: 1}], regionName: 'المركز'},
+      body: {storeId: 1, items: [{productId: oilId, quantity: 1}], regionName: 'المركز'},
     });
     const on2 = order2.data.order.order_number;
     const cancel = await req('POST', `/api/market/orders/${order2.data.order.id}/cancel`,
@@ -394,7 +427,7 @@ async function main() {
     ok('user cancels before send', cancel.status === 200 && cancel.data.order.status === 'cancelled');
     const cancelAgain = await req('POST', '/api/market/orders', {
       marketToken: mtok2,
-      body: {storeId: 1, items: [{productId: 2, quantity: 1}], regionName: 'المركز'},
+      body: {storeId: 1, items: [{productId: oilId, quantity: 1}], regionName: 'المركز'},
     });
     const on3 = cancelAgain.data.order.order_number;
     await req('POST', '/api/v1/store/orders/action',
@@ -411,9 +444,9 @@ async function main() {
     ok('partial return keeps delivered', ret1.status === 200 &&
       ret1.data.order.status === 'delivered' && ret1.data.order.returned_minor === 3200);
     const ret2 = await req('POST', '/api/v1/store/orders/action',
-      {body: {...auth, orderNumber, action: 'return', returnedMinor: 4100}});
+      {body: {...auth, orderNumber, action: 'return', returnedMinor: 10000}});
     ok('full return flips status', ret2.status === 200 &&
-      ret2.data.order.status === 'returned' && ret2.data.order.returned_minor === 7300);
+      ret2.data.order.status === 'returned' && ret2.data.order.returned_minor === 13200);
     const retBad = await req('POST', '/api/v1/store/orders/action',
       {body: {...auth, orderNumber, action: 'return', returnedMinor: 1}});
     ok('return over items total rejected', retBad.status === 400);

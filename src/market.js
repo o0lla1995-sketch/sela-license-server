@@ -183,6 +183,19 @@ CREATE INDEX IF NOT EXISTS idx_order_items_order ON market_order_items(order_id)
   }
 })();
 
+/* ── ترحيل v4.3: خيارات المنتجات (مقاسات/ألوان/أحجام المشروبات…)
+ *    + لقطة الخيار المختار على سطر الطلب (variant). */
+(function migrateProductOptions() {
+  const cols = db.prepare('PRAGMA table_info(store_products)').all().map(c => c.name);
+  if (!cols.includes('options')) {
+    db.exec('ALTER TABLE store_products ADD COLUMN options TEXT');
+  }
+  const itemCols = db.prepare('PRAGMA table_info(market_order_items)').all().map(c => c.name);
+  if (!itemCols.includes('variant')) {
+    db.exec('ALTER TABLE market_order_items ADD COLUMN variant TEXT');
+  }
+})();
+
 /* ── تخزين صور المنتجات: DATA_DIR/market-images/<store_id>/<hash>.<ext>
  *    مسارات المحتوى المُوجّهة بالهاش تسمح بكاش دائم (immutable). */
 const IMAGES_DIR = path.join(
@@ -210,13 +223,14 @@ const m = {
 
   upsertProduct: db.prepare(
     `INSERT INTO store_products
-       (store_id, product_ref, name, category, price_minor, stock, barcode, sold_by_weight, unit_label, description, available, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+       (store_id, product_ref, name, category, price_minor, stock, barcode, sold_by_weight, unit_label, description, options, available, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
      ON CONFLICT(store_id, product_ref) DO UPDATE SET
        name = excluded.name, category = excluded.category,
        price_minor = excluded.price_minor, stock = excluded.stock,
        barcode = excluded.barcode, sold_by_weight = excluded.sold_by_weight,
        unit_label = excluded.unit_label, description = excluded.description,
+       options = excluded.options,
        available = 1, updated_at = excluded.updated_at`),
   markMissingUnavailable: db.prepare(
     `UPDATE store_products SET available = 0, updated_at = ?
@@ -264,8 +278,8 @@ const m = {
      WHERE id = ?`),
   insertOrderItem: db.prepare(
     `INSERT INTO market_order_items
-       (order_id, product_id, product_ref, product_name, unit_price_minor, quantity, line_total_minor)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`),
+       (order_id, product_id, product_ref, product_name, unit_price_minor, quantity, line_total_minor, variant)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`),
   orderItems: db.prepare('SELECT * FROM market_order_items WHERE order_id = ?'),
 
   // v4.2: صور المنتجات (content-addressed داخل نطاق المتجر)
@@ -298,12 +312,12 @@ const m = {
      ORDER BY s.updated_at DESC LIMIT 500`),
   storeProductsPage: db.prepare(
     `SELECT p.id, p.product_ref, p.name, p.category, p.price_minor, p.stock, p.barcode,
-            p.sold_by_weight, p.unit_label, p.description, p.store_id
+            p.sold_by_weight, p.unit_label, p.description, p.options, p.store_id
      FROM store_products p WHERE p.store_id = ? AND p.available = 1
      ORDER BY p.name COLLATE NOCASE ASC LIMIT ? OFFSET ?`),
   storeProductsSearch: db.prepare(
     `SELECT p.id, p.product_ref, p.name, p.category, p.price_minor, p.stock, p.barcode,
-            p.sold_by_weight, p.unit_label, p.description, p.store_id
+            p.sold_by_weight, p.unit_label, p.description, p.options, p.store_id
      FROM store_products p WHERE p.store_id = ? AND p.available = 1
        AND p.name LIKE ? ESCAPE '\\'
      ORDER BY p.name COLLATE NOCASE ASC LIMIT ? OFFSET ?`),
@@ -311,7 +325,7 @@ const m = {
     `SELECT * FROM store_products WHERE store_id = ? AND available = 1 AND id = ?`),
   crossProducts: db.prepare(
     `SELECT p.id, p.product_ref, p.name, p.category, p.price_minor, p.stock, p.barcode,
-            p.sold_by_weight, p.unit_label, p.store_id, s.name AS store_name, s.store_number
+            p.sold_by_weight, p.unit_label, p.options, p.store_id, s.name AS store_name, s.store_number
      FROM store_products p
      JOIN stores s ON s.id = p.store_id
      JOIN keys k ON k.id = s.key_id
@@ -322,7 +336,7 @@ const m = {
   // واحد مُعدّ مسبقاً: المعامل الفارغ يعطّل الفلتر (لا تضاعف للعبارات).
   crossProductsFiltered: db.prepare(
     `SELECT p.id, p.product_ref, p.name, p.category, p.price_minor, p.stock, p.barcode,
-            p.sold_by_weight, p.unit_label, p.store_id, s.name AS store_name, s.store_number
+            p.sold_by_weight, p.unit_label, p.options, p.store_id, s.name AS store_name, s.store_number
      FROM store_products p
      JOIN stores s ON s.id = p.store_id
      JOIN keys k ON k.id = s.key_id
@@ -345,6 +359,37 @@ const m = {
 
 function sha256(text) {
   return crypto.createHash('sha256').update(String(text)).digest('hex');
+}
+
+/* ── v4.3: خيارات المنتجات — [{name, values:[…]}] ──────────────
+ * التطبيع والتحقق: حتى 4 مجموعات (مقاس/لون/حجم…)، اسم ≤24 محرفاً،
+ * حتى 12 قيمة لكل مجموعة بقيمة ≤24 محرفاً — أي تجاوز يُقصّ بأمان. */
+function normalizeOptions(raw) {
+  if (!Array.isArray(raw)) return null;
+  const groups = [];
+  for (const g of raw.slice(0, 4)) {
+    if (g == null || typeof g !== 'object') continue;
+    const name = String(g.name || '').trim().slice(0, 24);
+    const values = (Array.isArray(g.values) ? g.values : [])
+      .map(v => String(v || '').trim().slice(0, 24))
+      .filter(v => v.length > 0)
+      .slice(0, 12);
+    if (name.length > 0 && values.length > 0) {
+      groups.push({name, values});
+    }
+  }
+  return groups.length > 0 ? JSON.stringify(groups) : null;
+}
+
+/** يفكّ JSON الخيارات المخزّن — null عند الغياب/الفساد. */
+function parseOptions(text) {
+  if (typeof text !== 'string' || text.length === 0) return null;
+  try {
+    const arr = JSON.parse(text);
+    return Array.isArray(arr) && arr.length > 0 ? arr : null;
+  } catch (_) {
+    return null;
+  }
 }
 
 /* ── v4.2: كلمات المرور (scrypt — مكتبة Node المدمجة، بلا اعتماديات) ──
@@ -420,6 +465,7 @@ function imageUrl(row) {
 function attachImages(rows) {
   for (const row of rows) {
     row.images = m.imagesOfProducts.all(row.id).map(imageUrl);
+    row.options = parseOptions(row.options);
   }
   return rows;
 }
@@ -632,6 +678,7 @@ function buildStoreRouter() {
           p.soldByWeight ? 1 : 0,
           String(p.unitLabel || '').trim().slice(0, 20) || null,
           String(p.description || '').trim().slice(0, 300) || null,
+          normalizeOptions(p.options),
           now,
         );
         saved += 1;
@@ -1160,9 +1207,13 @@ function buildMarketRouter() {
       if (!Number.isFinite(quantity) || quantity <= 0 || quantity > 100000) {
         return res.status(400).json({ok: false, error: 'BAD_QUANTITY'});
       }
+      // v4.3: لقطة الخيار المختار (مقاس/لون…) — نص عرض فقط ≤120 محرفاً؛
+      // الأسعار تبقى من الكتالوج مهما أُرسل. لا يُشترط لإبقاء توافق
+      // الإصدارات الأقدم من التطبيق.
+      const variant = String(it?.variant || '').trim().slice(0, 120) || null;
       const lineTotal = Math.round(product.price_minor * quantity);
       itemsTotal += lineTotal;
-      lines.push({product, quantity, lineTotal});
+      lines.push({product, quantity, lineTotal, variant});
     }
     const deliveryFee = matched.fee_minor;
     const total = itemsTotal + deliveryFee;
@@ -1184,7 +1235,7 @@ function buildMarketRouter() {
           for (const l of lines) {
             m.insertOrderItem.run(
               orderId, l.product.id, l.product.product_ref, l.product.name,
-              l.product.price_minor, l.quantity, l.lineTotal,
+              l.product.price_minor, l.quantity, l.lineTotal, l.variant,
             );
           }
           order = m.orderById.get(orderId);
@@ -1201,7 +1252,9 @@ function buildMarketRouter() {
       ip: req.ip,
       details: {order: order.order_number, storeId: store.id},
     });
-    res.json({ok: true, order});
+    // v4.3: الطلب يُعاد كاملاً بأسطره (مع لقطة الخيار المختار) —
+    // التطبيق يعرض تفاصيل الطلب فور نجاح الشراء دون نداء إضافي.
+    res.json({ok: true, order: {...order, items: m.orderItems.all(order.id)}});
   });
 
   router.get('/orders', (req, res) => {
