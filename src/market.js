@@ -250,6 +250,19 @@ const m = {
      WHERE p.available = 1 AND s.published = 1 AND k.revoked_at IS NULL
        AND k.plan_expires_at IS NOT NULL AND k.plan_expires_at > ?
      ORDER BY p.updated_at DESC LIMIT ? OFFSET ?`),
+  // v4.1: البحث العابر للمتاجر (q) + فلتر التصنيف (category) — استعلام
+  // واحد مُعدّ مسبقاً: المعامل الفارغ يعطّل الفلتر (لا تضاعف للعبارات).
+  crossProductsFiltered: db.prepare(
+    `SELECT p.id, p.product_ref, p.name, p.category, p.price_minor, p.stock, p.barcode,
+            p.sold_by_weight, p.unit_label, p.store_id, s.name AS store_name, s.store_number
+     FROM store_products p
+     JOIN stores s ON s.id = p.store_id
+     JOIN keys k ON k.id = s.key_id
+     WHERE p.available = 1 AND s.published = 1 AND k.revoked_at IS NULL
+       AND k.plan_expires_at IS NOT NULL AND k.plan_expires_at > ?
+       AND (? = '' OR p.name LIKE ? ESCAPE '\\')
+       AND (? = '' OR p.category = ?)
+     ORDER BY p.updated_at DESC LIMIT ? OFFSET ?`),
   categories: db.prepare(
     `SELECT p.category AS category, COUNT(*) AS n FROM store_products p
      JOIN stores s ON s.id = p.store_id
@@ -650,9 +663,15 @@ function buildMarketRouter() {
   });
 
   router.get('/products', (req, res) => {
+    const q = String(req.query.q || '').trim();
+    const category = String(req.query.category || '').trim();
     const page = Math.max(1, Math.min(1000, Number(req.query.page) || 1));
     const per = Math.min(100, Math.max(10, Number(req.query.per) || 50));
-    const rows = m.crossProducts.all(Date.now(), per, (page - 1) * per);
+    // v4.1: بحث عابر للمتاجر + فلتر تصنيف — نفس الاستعلام المُعدّ مسبقاً
+    // بتركيبة «معامل فارغ = بلا فلتر» حتى لا تتضاعف العبارات.
+    const like = q.replace(/[\\%_]/g, c => '\\' + c) + '%';
+    const rows = m.crossProductsFiltered.all(
+      Date.now(), q, like, category, category, per, (page - 1) * per);
     res.json({ok: true, products: rows, page});
   });
 

@@ -182,6 +182,17 @@ async function main() {
     const search = await req('GET', '/api/market/stores/1/products?q=' + encodeURIComponent('أرز'));
     ok('product search', search.data.products.length === 1);
 
+    // v4.1: البحث العابر للمتاجر + فلتر التصنيف
+    const crossQ = await req('GET', '/api/market/products?q=' + encodeURIComponent('أرز'));
+    ok('cross-store search finds only أرز', crossQ.data.products.length === 1 &&
+      crossQ.data.products[0].name === 'أرز أبو كاس 5كغ');
+    const crossCat = await req('GET', '/api/market/products?category=' + encodeURIComponent('خضار'));
+    ok('cross-store category filter', crossCat.data.products.length === 1 &&
+      crossCat.data.products.every(p => p.category === 'خضار'));
+    const crossQCat = await req('GET', '/api/market/products?q=' + encodeURIComponent('أرز') +
+      '&category=' + encodeURIComponent('خضار'));
+    ok('cross search + category combined (no match)', crossQCat.data.products.length === 0);
+
     /* ── 5) مستخدم المتجر ──────────────────────────────────── */
     const ureg = await req('POST', '/api/market/auth/register',
       {body: {idNumber: '401234567', name: 'أحمد الخطيب', phone: '0598765432'}});
