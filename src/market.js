@@ -15,6 +15,10 @@
  *       GET  /products (عابر للمتاجر) · /categories
  *       POST /auth/register · /auth/login        (token جلسة)
  *       POST /orders · GET /orders · POST /orders/:id/cancel
+ *       v4.4: GET /regions · ?region= على /stores · دفتر عناوين
+ *            (GET/POST /addresses · /addresses/:id/default|delete)
+ *            · تقييم المتجر عند التسليم (POST /orders/:id/rate
+ *            · GET /stores/:id/ratings) بمتوسط يظهر على كل المتاجر
  *
  *  3) Admin API    /api/admin/market/* — لوحة التحكم (متاجر + طلبات)
  *
@@ -157,6 +161,43 @@ CREATE TABLE IF NOT EXISTS market_orders (
 );
 CREATE INDEX IF NOT EXISTS idx_orders_store ON market_orders(store_id, updated_at);
 CREATE INDEX IF NOT EXISTS idx_orders_user ON market_orders(user_id, updated_at);
+
+/* ── v4.4: عناوين المستخدمين المحفوظة ────────────────────────
+ * عنوان كامل (منطقة/مدينة/شارع/بناية/طابق/شقة) بلقب (منزل/عمل…)
+ * وعنوان افتراضي واحد — يغذي التصفية «متاجر تخدم منطقتك»، مقارنة
+ * رسوم التوصيل بين المتاجر، وإتمام الطلب بلمسة واحدة. */
+CREATE TABLE IF NOT EXISTS market_addresses (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id       INTEGER NOT NULL REFERENCES market_users(id) ON DELETE CASCADE,
+  label         TEXT NOT NULL DEFAULT 'المنزل',
+  region        TEXT NOT NULL,
+  city          TEXT,
+  street        TEXT,
+  building      TEXT,
+  floor         TEXT,
+  apartment     TEXT,
+  phone         TEXT,
+  notes         TEXT,
+  is_default    INTEGER NOT NULL DEFAULT 0,
+  created_at    INTEGER NOT NULL,
+  updated_at    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_market_addresses_user ON market_addresses(user_id);
+
+/* ── v4.4: تقييمات المتاجر عند استلام الطلب ──────────────────
+ * تقييم واحد لكل طلب (owner فقط، بعد التسليم) 1–5 نجوم + تعليق
+ * اختياري — يجمّع لكل متجر متوسطاً وعدداً يظهر في التطبيق. */
+CREATE TABLE IF NOT EXISTS market_ratings (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  order_id      INTEGER NOT NULL UNIQUE REFERENCES market_orders(id) ON DELETE CASCADE,
+  user_id       INTEGER NOT NULL REFERENCES market_users(id) ON DELETE CASCADE,
+  store_id      INTEGER NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+  stars         INTEGER NOT NULL CHECK (stars BETWEEN 1 AND 5),
+  comment       TEXT,
+  created_at    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_market_ratings_store ON market_ratings(store_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_market_ratings_user ON market_ratings(user_id);
 
 CREATE TABLE IF NOT EXISTS market_order_items (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -353,6 +394,59 @@ const m = {
        AND s.published = 1 AND k.revoked_at IS NULL
        AND k.plan_expires_at IS NOT NULL AND k.plan_expires_at > ?
      GROUP BY p.category ORDER BY n DESC LIMIT 100`),
+
+  /* ── v4.4: متاجر تخدم منطقة محددة (مع رسم توصيلها لها) ──── */
+  publishedStoresInRegion: db.prepare(
+    `SELECT s.id, s.store_number, s.name, s.description, s.category, s.region,
+            s.phone, s.whatsapp, r.fee_minor AS region_fee_minor
+     FROM stores s
+     JOIN store_delivery_regions r ON r.store_id = s.id AND r.enabled = 1 AND r.name = ?
+     JOIN keys k ON k.id = s.key_id
+     WHERE s.published = 1 AND k.revoked_at IS NULL
+       AND k.plan_expires_at IS NOT NULL AND k.plan_expires_at > ?
+     ORDER BY r.fee_minor ASC, s.updated_at DESC LIMIT 500`),
+  allDeliveryRegions: db.prepare(
+    `SELECT DISTINCT r.name AS name FROM store_delivery_regions r
+     JOIN stores s ON s.id = r.store_id
+     JOIN keys k ON k.id = s.key_id
+     WHERE r.enabled = 1 AND s.published = 1 AND k.revoked_at IS NULL
+       AND k.plan_expires_at IS NOT NULL AND k.plan_expires_at > ?
+     ORDER BY r.name ASC LIMIT 200`),
+
+  /* ── v4.4: العناوين المحفوظة ─────────────────────────────── */
+  addressesOfUser: db.prepare(
+    'SELECT * FROM market_addresses WHERE user_id = ? ORDER BY is_default DESC, updated_at DESC'),
+  addressById: db.prepare('SELECT * FROM market_addresses WHERE id = ?'),
+  insertAddress: db.prepare(
+    `INSERT INTO market_addresses
+       (user_id, label, region, city, street, building, floor, apartment, phone, notes, is_default, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+  updateAddress: db.prepare(
+    `UPDATE market_addresses SET label = ?, region = ?, city = ?, street = ?, building = ?,
+       floor = ?, apartment = ?, phone = ?, notes = ?, is_default = ?, updated_at = ?
+     WHERE id = ?`),
+  clearDefaultAddress: db.prepare(
+    'UPDATE market_addresses SET is_default = 0, updated_at = ? WHERE user_id = ?'),
+  setDefaultAddress: db.prepare(
+    'UPDATE market_addresses SET is_default = 1, updated_at = ? WHERE id = ? AND user_id = ?'),
+  deleteAddress: db.prepare(
+    'DELETE FROM market_addresses WHERE id = ? AND user_id = ?'),
+
+  /* ── v4.4: التقييمات ──────────────────────────────────────── */
+  insertRating: db.prepare(
+    `INSERT INTO market_ratings (order_id, user_id, store_id, stars, comment, created_at)
+     VALUES (?, ?, ?, ?, ?, ?)`),
+  ratingByOrder: db.prepare(
+    'SELECT stars, comment, created_at FROM market_ratings WHERE order_id = ?'),
+  ratingsOfStore: db.prepare(
+    `SELECT r.stars, r.comment, r.created_at, u.name AS user_name
+     FROM market_ratings r JOIN market_users u ON u.id = r.user_id
+     WHERE r.store_id = ? ORDER BY r.created_at DESC LIMIT 50`),
+  ratingStatsAll: db.prepare(
+    `SELECT store_id, AVG(stars) AS avg_stars, COUNT(*) AS n
+     FROM market_ratings GROUP BY store_id`),
+  ratingStatsStore: db.prepare(
+    `SELECT AVG(stars) AS avg_stars, COUNT(*) AS n FROM market_ratings WHERE store_id = ?`),
 };
 
 /* ── أدوات مساعدة ─────────────────────────────────────────────── */
@@ -905,6 +999,15 @@ function buildMarketRouter() {
 
   const TOKEN_HEADER = 'x-market-token';
 
+  /* v4.4: منع أي وسيط شبكة من «تحويل» الردود (ضغط gzip عبر بوابة
+   * النشر أو بروكسيات مزودي الجوال على HTTP الصريح) — شبكات عربية
+   * عدة تُفسد الردود المضغوطة فيعمل طلب المتاجر الصغيرة ويفشل الأكبر.
+   * التطبيق يطلب identity أيضاً — هذا الحزام الاحتياطي الثاني. */
+  router.use((_req, res, next) => {
+    res.setHeader('Cache-Control', 'no-transform');
+    next();
+  });
+
   /** يقرأ رمز الجلسة ويرجع المستخدم (أو null). */
   function currentUser(req) {
     const token = String(req.get(TOKEN_HEADER) || '').trim();
@@ -927,9 +1030,52 @@ function buildMarketRouter() {
 
   /* ── المتاجر والمنتجات (عام) ───────────────────────────────── */
 
-  router.get('/stores', (_req, res) => {
+  /** v4.4: متوسط التقييم وعدده لكل متجر (استعلام واحد لكل نداء قائمة). */
+  function ratingStatsMap() {
+    const map = new Map();
+    for (const row of m.ratingStatsAll.all()) {
+      map.set(row.store_id, {
+        rating: Math.round(row.avg_stars * 10) / 10,
+        ratingCount: row.n,
+      });
+    }
+    return map;
+  }
+
+  router.get('/stores', (req, res) => {
     const now = Date.now();
-    res.json({ok: true, stores: m.publishedStores.all(now)});
+    const ratings = ratingStatsMap();
+    // v4.4: ?region=غزة — متاجر تخدم المنطقة مرتبة برسم التوصيل لها
+    // تصاعدياً (أرخص توصيل أولاً) مع رسم كل متجر لتلك المنطقة — أساس
+    // قسم «متاجر تخدم منطقتك» ومقارنة رسوم التوصيل في التطبيق.
+    const region = String(req.query.region || '').trim();
+    if (region.length > 0) {
+      const rows = m.publishedStoresInRegion.all(region, now).map(s => ({
+        id: s.id,
+        store_number: s.store_number,
+        name: s.name,
+        description: s.description,
+        category: s.category,
+        region: s.region,
+        phone: s.phone,
+        whatsapp: s.whatsapp,
+        deliveryFeeMinor: s.region_fee_minor,
+        ...(ratings.get(s.id) ?? {rating: null, ratingCount: 0}),
+      }));
+      return res.json({ok: true, stores: rows});
+    }
+    const rows = m.publishedStores.all(now).map(s => ({
+      ...s,
+      ...(ratings.get(s.id) ?? {rating: null, ratingCount: 0}),
+    }));
+    res.json({ok: true, stores: rows});
+  });
+
+  /* v4.4: كل مناطق التوصيل المتاحة عبر المول — تغذي مسجل العنوان في
+   * التطبيق (اختيار المنطقة من قائمة حقيقية لا كتابة حرة). */
+  router.get('/regions', (_req, res) => {
+    const now = Date.now();
+    res.json({ok: true, regions: m.allDeliveryRegions.all(now).map(r => r.name)});
   });
 
   router.get('/stores/:id', (req, res) => {
@@ -946,8 +1092,36 @@ function buildMarketRouter() {
         region: store.region,
         phone: store.phone,
         whatsapp: store.whatsapp,
+        rating: (() => {
+          const r = m.ratingStatsStore.get(store.id);
+          return r != null && r.n > 0 ? Math.round(r.avg_stars * 10) / 10 : null;
+        })(),
+        ratingCount: (() => {
+          const r = m.ratingStatsStore.get(store.id);
+          return r != null ? r.n : 0;
+        })(),
       },
       deliveryRegions: m.listRegions.all(store.id).filter(r => r.enabled === 1),
+    });
+  });
+
+  /* v4.4: تقييمات متجر — أحدث 50 تعليقاً مع الاسم الأول وحرف الأب
+   * فقط (خصوصية المستخدم: «محمد ع.» لا الاسم الكامل ولا الهاتف). */
+  router.get('/stores/:id/ratings', (req, res) => {
+    const store = storePublic(Number(req.params.id));
+    if (!store) return res.status(404).json({ok: false, error: 'STORE_NOT_FOUND'});
+    const stats = m.ratingStatsStore.get(store.id);
+    res.json({
+      ok: true,
+      rating: stats != null && stats.n > 0 ? Math.round(stats.avg_stars * 10) / 10 : null,
+      ratingCount: stats != null ? stats.n : 0,
+      reviews: m.ratingsOfStore.all(store.id).map(r => ({
+        stars: r.stars,
+        comment: r.comment,
+        createdAt: r.created_at,
+        userName: String(r.user_name || '').trim().split(/\s+/).slice(0, 2)
+          .map((w, i) => (i === 0 ? w : `${w.charAt(0)}.`)).join(' ') || 'مستخدم سيلا',
+      })),
     });
   });
 
@@ -1263,6 +1437,12 @@ function buildMarketRouter() {
     const orders = m.ordersForUser.all(user.id).map(o => ({
       ...o,
       items: m.orderItems.all(o.id),
+      // v4.4: تقييم الطلب إن وُجد — يعرض التطبيق زر «قيّم» للطلبات
+      // المسلّمة غير المقيّمة ونجوم التقييم للمقيّمة.
+      rating: (() => {
+        const r = m.ratingByOrder.get(o.id);
+        return r == null ? null : {stars: r.stars, comment: r.comment};
+      })(),
       store: (() => {
         const s = m.storeById.get(o.store_id);
         return s ? {id: s.id, name: s.name, storeNumber: s.store_number} : null;
@@ -1286,6 +1466,140 @@ function buildMarketRouter() {
       'ألغى المستخدم الطلب', order.returned_minor, order.id);
     audit('market_order_cancelled', {ip: req.ip, details: {order: order.order_number}});
     res.json({ok: true, order: m.orderById.get(order.id)});
+  });
+
+  /* ── v4.4: تقييم الطلب بعد الاستلام ────────────────────────
+   * مالك الطلب فقط + حالة delivered فقط + تقييم واحد لكل طلب.
+   * يغذي متوسط تقييم المتجر الذي يظهر لكل مستخدمي المول. */
+  router.post('/orders/:id/rate', (req, res) => {
+    const user = currentUser(req);
+    if (!user) return res.status(401).json({ok: false, error: 'AUTH_REQUIRED'});
+    const order = m.orderById.get(Number(req.params.id));
+    if (order == null || order.user_id !== user.id) {
+      return res.status(404).json({ok: false, error: 'ORDER_NOT_FOUND'});
+    }
+    if (order.status !== 'delivered') {
+      return res.status(409).json({ok: false, error: 'BAD_STATUS', status: order.status});
+    }
+    if (m.ratingByOrder.get(order.id) != null) {
+      return res.status(409).json({ok: false, error: 'ALREADY_RATED'});
+    }
+    const stars = Math.round(Number(req.body?.stars));
+    if (!Number.isInteger(stars) || stars < 1 || stars > 5) {
+      return res.status(400).json({ok: false, error: 'BAD_RATING'});
+    }
+    const comment = String(req.body?.comment || '').trim().slice(0, 300) || null;
+    m.insertRating.run(order.id, user.id, order.store_id, stars, comment, Date.now());
+    const stats = m.ratingStatsStore.get(order.store_id);
+    audit('market_order_rated', {
+      ip: req.ip,
+      details: {order: order.order_number, stars, storeId: order.store_id},
+    });
+    res.json({
+      ok: true,
+      rating: {stars, comment},
+      storeRating: {
+        rating: stats != null && stats.n > 0 ? Math.round(stats.avg_stars * 10) / 10 : null,
+        ratingCount: stats != null ? stats.n : 0,
+      },
+    });
+  });
+
+  /* ── v4.4: دفتر عناوين المستخدم ───────────────────────── */
+  // الحد: 10 عناوين لكل حساب — كافٍ ومنع للإساءة.
+  function addressFromBody(body) {
+    return {
+      label: String(body?.label || '').trim().slice(0, 24) || 'المنزل',
+      region: String(body?.region || '').trim().slice(0, 60),
+      city: String(body?.city || '').trim().slice(0, 60) || null,
+      street: String(body?.street || '').trim().slice(0, 80) || null,
+      building: String(body?.building || '').trim().slice(0, 24) || null,
+      floor: String(body?.floor || '').trim().slice(0, 12) || null,
+      apartment: String(body?.apartment || '').trim().slice(0, 12) || null,
+      phone: String(body?.phone || '').replace(/[\s-]/g, '').slice(0, 16) || null,
+      notes: String(body?.notes || '').trim().slice(0, 200) || null,
+    };
+  }
+
+  router.get('/addresses', (req, res) => {
+    const user = currentUser(req);
+    if (!user) return res.status(401).json({ok: false, error: 'AUTH_REQUIRED'});
+    res.json({ok: true, addresses: m.addressesOfUser.all(user.id)});
+  });
+
+  router.post('/addresses', (req, res) => {
+    const user = currentUser(req);
+    if (!user) return res.status(401).json({ok: false, error: 'AUTH_REQUIRED'});
+    const input = addressFromBody(req.body);
+    if (input.region.length === 0) {
+      return res.status(400).json({ok: false, error: 'BAD_REGION'});
+    }
+    const existing = m.addressesOfUser.all(user.id);
+    if (existing.length >= 10) {
+      return res.status(400).json({ok: false, error: 'TOO_MANY_ADDRESSES'});
+    }
+    const addressId = Number(req.body?.id) || 0;
+    const makeDefault = req.body?.isDefault === true || existing.length === 0;
+    const now = Date.now();
+    let saved = null;
+    db.transaction(() => {
+      if (makeDefault) {
+        m.clearDefaultAddress.run(now, user.id);
+      }
+      if (addressId > 0) {
+        const current = m.addressById.get(addressId);
+        if (current == null || current.user_id !== user.id) {
+          throw new Error('ADDRESS_NOT_FOUND');
+        }
+        m.updateAddress.run(
+          input.label, input.region, input.city, input.street, input.building,
+          input.floor, input.apartment, input.phone, input.notes,
+          makeDefault ? 1 : current.is_default, now, addressId);
+        saved = m.addressById.get(addressId);
+      } else {
+        const info = m.insertAddress.run(
+          user.id, input.label, input.region, input.city, input.street, input.building,
+          input.floor, input.apartment, input.phone, input.notes, makeDefault ? 1 : 0,
+          now, now);
+        saved = m.addressById.get(Number(info.lastInsertRowid));
+      }
+    })();
+    res.json({ok: true, address: saved});
+  });
+
+  router.post('/addresses/:id/default', (req, res) => {
+    const user = currentUser(req);
+    if (!user) return res.status(401).json({ok: false, error: 'AUTH_REQUIRED'});
+    const address = m.addressById.get(Number(req.params.id));
+    if (address == null || address.user_id !== user.id) {
+      return res.status(404).json({ok: false, error: 'ADDRESS_NOT_FOUND'});
+    }
+    const now = Date.now();
+    db.transaction(() => {
+      m.clearDefaultAddress.run(now, user.id);
+      m.setDefaultAddress.run(now, address.id, user.id);
+    })();
+    res.json({ok: true, address: m.addressById.get(address.id)});
+  });
+
+  router.post('/addresses/:id/delete', (req, res) => {
+    const user = currentUser(req);
+    if (!user) return res.status(401).json({ok: false, error: 'AUTH_REQUIRED'});
+    const address = m.addressById.get(Number(req.params.id));
+    if (address == null || address.user_id !== user.id) {
+      return res.status(404).json({ok: false, error: 'ADDRESS_NOT_FOUND'});
+    }
+    const wasDefault = address.is_default === 1;
+    m.deleteAddress.run(address.id, user.id);
+    // حذف الافتراضي: أول عنوان متبقٍ يصبح افتراضياً (يبقى للتطبيق
+    // منطق «متاجر منطقتك» فعالاً دائماً).
+    if (wasDefault) {
+      const rest = m.addressesOfUser.all(user.id);
+      if (rest.length > 0) {
+        m.setDefaultAddress.run(Date.now(), rest[0].id, user.id);
+      }
+    }
+    res.json({ok: true});
   });
 
   return router;

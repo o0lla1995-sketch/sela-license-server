@@ -416,6 +416,122 @@ async function main() {
       myOrders.data.orders[0].status === 'delivered' &&
       myOrders.data.orders[0].store.name === 'سوبر ماركت النور ٢');
 
+    /* ── 8.5) v4.4: تقييم الطلب بعد التسليم ────────────────── */
+    const ratedOrderId = order.data.order.id;
+    const badStars = await req('POST', `/api/market/orders/${ratedOrderId}/rate`,
+      {marketToken: mtok2, body: {stars: 9}});
+    ok('rating stars out of range rejected', badStars.status === 400);
+    const noAuthRate = await req('POST', `/api/market/orders/${ratedOrderId}/rate`,
+      {body: {stars: 5}});
+    ok('rating without token rejected', noAuthRate.status === 401);
+    const rate = await req('POST', `/api/market/orders/${ratedOrderId}/rate`,
+      {marketToken: mtok2, body: {stars: 5, comment: 'توصيل سريع وتعامل ممتاز'}});
+    ok('delivered order rated', rate.status === 200 && rate.data.rating.stars === 5 &&
+      rate.data.storeRating.rating === 5 && rate.data.storeRating.ratingCount === 1);
+    const rateAgain = await req('POST', `/api/market/orders/${ratedOrderId}/rate`,
+      {marketToken: mtok2, body: {stars: 3}});
+    ok('double rating rejected', rateAgain.status === 409);
+    // طلب جديد (لم يُسلّم) — تقييمه مرفوض
+    const newOrderForRate = await req('POST', '/api/market/orders', {
+      marketToken: mtok2,
+      body: {storeId: 1, items: [{productId: oilId, quantity: 1}], regionName: 'المركز'},
+    });
+    const rateUnrated = await req('POST',
+      `/api/market/orders/${newOrderForRate.data.order.id}/rate`,
+      {marketToken: mtok2, body: {stars: 4}});
+    ok('rating non-delivered order rejected', rateUnrated.status === 409);
+
+    /* التقييم يظهر على المتجر للجميع */
+    const storesAfterRating = await req('GET', '/api/market/stores');
+    const ratedStore = storesAfterRating.data.stores.find(s => s.id === 1);
+    ok('store rating visible in stores list',
+      ratedStore.rating === 5 && ratedStore.ratingCount === 1);
+    const detailAfterRating = await req('GET', '/api/market/stores/1');
+    ok('store rating visible in store detail',
+      detailAfterRating.data.store.rating === 5 &&
+      detailAfterRating.data.store.ratingCount === 1);
+    const reviews = await req('GET', '/api/market/stores/1/ratings');
+    ok('store reviews listed with anonymized name',
+      reviews.data.rating === 5 && reviews.data.reviews.length === 1 &&
+      reviews.data.reviews[0].comment === 'توصيل سريع وتعامل ممتاز' &&
+      reviews.data.reviews[0].userName.split(' ').length <= 2 &&
+      !reviews.data.reviews[0].userName.includes('0598765432') &&
+      !reviews.data.reviews[0].userName.includes('الخطيب'));
+
+    /* الطلب المقيّم يظهر بتقييمه في طلباتي */
+    const myOrdersRated = await req('GET', '/api/market/orders', {marketToken: mtok2});
+    const ratedOrder = myOrdersRated.data.orders.find(o => o.id === ratedOrderId);
+    ok('order shows its rating', ratedOrder.rating != null &&
+      ratedOrder.rating.stars === 5);
+
+    /* ── 8.6) v4.4: مناطق التوصيل + فلتر المنطقة ───────────── */
+    const regionsList = await req('GET', '/api/market/regions');
+    ok('delivery regions listed',
+      regionsList.status === 200 && regionsList.data.regions.includes('المركز'));
+    const storesInRegion = await req('GET',
+      `/api/market/stores?region=${encodeURIComponent('المركز')}`);
+    ok('stores filtered by region with fee',
+      storesInRegion.status === 200 && storesInRegion.data.stores.length === 1 &&
+      storesInRegion.data.stores[0].id === 1 &&
+      typeof storesInRegion.data.stores[0].deliveryFeeMinor === 'number');
+    const storesInEmpty = await req('GET',
+      `/api/market/stores?region=${encodeURIComponent('منطقة-غير-موجودة')}`);
+    ok('unknown region returns empty list',
+      storesInEmpty.status === 200 && storesInEmpty.data.stores.length === 0);
+
+    /* ── 8.7) v4.4: دفتر عناوين المستخدم ───────────────────── */
+    const addrNoAuth = await req('GET', '/api/market/addresses');
+    ok('addresses without token rejected', addrNoAuth.status === 401);
+    const addrBad = await req('POST', '/api/market/addresses',
+      {marketToken: mtok2, body: {label: 'المنزل', city: 'غزة'}});
+    ok('address without region rejected', addrBad.status === 400);
+    const addr1 = await req('POST', '/api/market/addresses', {
+      marketToken: mtok2,
+      body: {label: 'المنزل', region: 'المركز', city: 'غزة', street: 'النصر',
+        building: '12', floor: '3', apartment: '5', phone: '0599123456',
+        notes: 'الاتصال قبل الوصول'},
+    });
+    ok('first address saved as default', addr1.status === 200 &&
+      addr1.data.address.is_default === 1 && addr1.data.address.region === 'المركز');
+    const addr2 = await req('POST', '/api/market/addresses', {
+      marketToken: mtok2,
+      body: {label: 'العمل', region: 'المركز', city: 'غزة', street: 'الجلاء', building: '4'},
+    });
+    ok('second address saved non-default', addr2.status === 200 &&
+      addr2.data.address.is_default === 0);
+    const addrList = await req('GET', '/api/market/addresses', {marketToken: mtok2});
+    ok('addresses listed default first',
+      addrList.data.addresses.length === 2 &&
+      addrList.data.addresses[0].id === addr1.data.address.id);
+    const setDefault = await req('POST',
+      `/api/market/addresses/${addr2.data.address.id}/default`, {marketToken: mtok2});
+    ok('default address switched', setDefault.status === 200 &&
+      setDefault.data.address.is_default === 1);
+    const addrUpdate = await req('POST', '/api/market/addresses', {
+      marketToken: mtok2,
+      body: {id: addr1.data.address.id, label: 'بيت الأهل', region: 'المركز',
+        city: 'غزة', street: 'النصر', building: '99'},
+    });
+    ok('address updated in place', addrUpdate.status === 200 &&
+      addrUpdate.data.address.id === addr1.data.address.id &&
+      addrUpdate.data.address.label === 'بيت الأهل' &&
+      addrUpdate.data.address.building === '99');
+    const delAddr = await req('POST',
+      `/api/market/addresses/${addr1.data.address.id}/delete`, {marketToken: mtok2});
+    const addrList2 = await req('GET', '/api/market/addresses', {marketToken: mtok2});
+    ok('address deleted, remaining keeps default',
+      delAddr.status === 200 && addrList2.data.addresses.length === 1 &&
+      addrList2.data.addresses[0].is_default === 1);
+    // مستخدم آخر لا يستطيع حذف عنوان غيره (404 لا يكشف الوجود)
+    const otherUser = await req('POST', '/api/market/auth/register', {
+      body: {idNumber: '402987654', name: 'سارة نمر', phone: '0591112233',
+        password: 'other-user-77pass'},
+    });
+    const addrOther = await req('POST',
+      `/api/market/addresses/${addr2.data.address.id}/delete`,
+      {marketToken: otherUser.data.token});
+    ok('cannot delete another user address', addrOther.status === 404);
+
     /* ── 9) إلغاء المستخدم ─────────────────────────────────── */
     const order2 = await req('POST', '/api/market/orders', {
       marketToken: mtok2,
@@ -487,7 +603,7 @@ async function main() {
     /* ── 13) لوحة الإدارة ──────────────────────────────────── */
     const mstats = await req('GET', '/api/admin/market/stats', {token: 'root-master-token'});
     ok('admin market stats', mstats.data.ok && mstats.data.stores === 1 &&
-      mstats.data.users === 1 && mstats.data.orders === 3);
+      mstats.data.users === 2 && mstats.data.orders === 4);
     const mstores = await req('GET', '/api/admin/market/stores', {token: 'root-master-token'});
     ok('admin stores list flags subscription',
       mstores.data.stores.length === 1 && mstores.data.stores[0].subscriptionActive === false);
