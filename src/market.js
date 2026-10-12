@@ -37,8 +37,9 @@ const express = require('express');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const {db, stmt, getSetting, audit} = require('./db');
+const {db, stmt, getSetting, setSetting, audit} = require('./db');
 const {verifyLicensePair} = require('./crypto');
+const {sendSms, smsConfigComplete} = require('./sms');
 
 const DAY_MS = 24 * 3600 * 1000;
 
@@ -135,6 +136,21 @@ CREATE TABLE IF NOT EXISTS market_tokens (
   expires_at    INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_market_tokens_user ON market_tokens(user_id);
+
+/* ── v5.0: رموز استعادة كلمة المرور (نسيت كلمة المرور برمز SMS)
+ * ──── خزن الرمز مُعمّى (scrypt) لا نصاً صريحاً — اختراق قاعدة
+ * البيانات لا يكشف رموزاً صالحة. صلاحية 10 دقائق وحد أقصى 5
+ * محاولات تحقق لكل رمز و3 رموز/ساعة لكل حساب (محدد المعدل في
+ * الذاكرة أدناه). */
+CREATE TABLE IF NOT EXISTS market_reset_codes (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id    INTEGER NOT NULL REFERENCES market_users(id) ON DELETE CASCADE,
+  code_hash  TEXT NOT NULL,
+  attempts   INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_reset_codes_user ON market_reset_codes(user_id, created_at);
 
 CREATE TABLE IF NOT EXISTS market_orders (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -599,6 +615,79 @@ function recordLoginFail(idNumber) {
 
 function clearLoginFails(idNumber) {
   loginFails.delete(idNumber);
+}
+
+/* ── v5.0: رموز استعادة كلمة المرور ──────────────────────────
+ * تعمية الرمز بنفس بنية كلمات المرور (scrypt$salt$hash) لكن
+ * بتكلفة أخف (N=4096) — الرمز عمره 10 دقائق فلا يستحق تكلفة
+ * 16384، ويظل مقاوماً للتفكير الشامل عند تسريب القاعدة. */
+const RESET_CODE_TTL_MS = 10 * 60 * 1000;   // صلاحية الرمز
+const RESET_MAX_ATTEMPTS = 5;               // محاولات تحقق لكل رمز
+const RESET_CODES_PER_HOUR = 3;             // رموز لكل حساب/ساعة
+const SCRYPT_LIGHT = {N: 4096, r: 8, p: 1};
+
+function hashResetCode(code) {
+  const salt = crypto.randomBytes(12).toString('hex');
+  const hash = crypto.scryptSync(String(code), salt, 24, SCRYPT_LIGHT).toString('hex');
+  return `scrypt$${salt}$${hash}`;
+}
+
+function verifyResetCode(code, stored) {
+  if (typeof stored !== 'string' || !stored.startsWith('scrypt$')) return false;
+  const parts = stored.split('$');
+  if (parts.length !== 3) return false;
+  try {
+    const check = crypto.scryptSync(String(code), parts[1], 24, SCRYPT_LIGHT);
+    const expected = Buffer.from(parts[2], 'hex');
+    return expected.length === check.length &&
+      crypto.timingSafeEqual(expected, check);
+  } catch {
+    return false;
+  }
+}
+
+/** محدد المعدل: user_id → أوقات طلب الرموز (ذاكرة فقط). */
+const resetCodeTimes = new Map(); // userId → [ts, ...]
+setInterval(() => {
+  const cutoff = Date.now() - 3600 * 1000;
+  for (const [uid, list] of resetCodeTimes) {
+    const kept = list.filter(t => t > cutoff);
+    if (kept.length === 0) {
+      resetCodeTimes.delete(uid);
+    } else {
+      resetCodeTimes.set(uid, kept);
+    }
+  }
+}, 10 * 60 * 1000).unref();
+
+function resetCodeRateExceeded(userId) {
+  const cutoff = Date.now() - 3600 * 1000;
+  const list = (resetCodeTimes.get(userId) || []).filter(t => t > cutoff);
+  return list.length >= RESET_CODES_PER_HOUR;
+}
+
+function recordResetCodeRequest(userId) {
+  const list = resetCodeTimes.get(userId) || [];
+  list.push(Date.now());
+  resetCodeTimes.set(userId, list);
+}
+
+/** إعدادات SMS الحالية (قراءة موحدة من settings). */
+function smsSettings() {
+  const keys = [
+    'sms_provider', 'sms_username', 'sms_password', 'sms_sender',
+    'sms_app_sid', 'sms_account_sid', 'sms_auth_token',
+    'sms_generic_url', 'sms_generic_method', 'sms_generic_body',
+  ];
+  const out = {};
+  for (const k of keys) out[k] = getSetting(k, '');
+  return out;
+}
+
+/** هل مزود SMS جاهز للعمل الآن؟ */
+function smsReady() {
+  const s = smsSettings();
+  return smsConfigComplete(s.sms_provider, s);
 }
 
 /* ── v4.2: مساعدات الصور ────────────────────────────────────── */
@@ -1512,19 +1601,38 @@ function buildMarketRouter() {
     res.json({ok: true});
   });
 
-  /* ── reset: نسيت كلمة المرور (رقم الهوية + الجوال المسجل) ──
-   * ما من بوابة SMS/بريد في المنظومة — التحقق بزوج الهوية/الجوال
-   * المسجل (نفس قوة الدخول القديم) ثم تعيين كلمة جديدة وإبطال
-   * كل الجلسات. محمي بمحدد المعدل العام + قفل المحاولات أعلاه. */
-  router.post('/auth/reset', (req, res) => {
-    const {idNumber, phone, newPassword} = req.body || {};
+  /* ── v5.0: config عام — يقرأ منه التطبيق حالة «نسيت كلمة المرور»
+   * ورقم تواصل الإدارة. الخيار الخفي (market_forgot_enabled=0)
+   * يحوّل زر «نسيت كلمة المرور؟» في التطبيق إلى «تواصل مع الإدارة»
+   * — استعادة الحسابات تصبح من اللوحة فقط بقرار المالك. */
+  router.get('/config', (_req, res) => {
+    const forgotEnabled = getSetting('market_forgot_enabled', '0') === '1' && smsReady();
+    res.json({
+      ok: true,
+      forgotPassword: forgotEnabled,
+      contactPhone: getSetting('market_contact_phone', '') || null,
+    });
+  });
+
+  /* ── v5.0: نسيت كلمة المرور — خطوة 1: طلب رمز SMS ───────────
+   * الاستعادة القديمة (هوية + هاتف ⇒ تغيير فوري) كانت ثغرة تتيح
+   * سرقة أي حساب بمعرفة رقمي هويته وجواله. المسار الجديد:
+   *  • مفعّل من اللوحة فقط (market_forgot_enabled=1) ومزود SMS
+   *    مكتمل — وإلا فالزر أصلاً لا يظهر في التطبيق (config أعلاه).
+   *  • الرمز يصل للجوال المسجل في الحساب نفسه فقط.
+   *  • قفل محاولات الدخول + 3 رموز/ساعة/حساب.
+   *  • الرمز مخزن معمّى بصلاحية 10 دقائق. */
+  router.post('/auth/forgot/request', (req, res) => {
+    const {idNumber, phone} = req.body || {};
     const id = String(idNumber || '').replace(/\s+/g, '');
+    if (getSetting('market_forgot_enabled', '0') !== '1') {
+      return res.status(403).json({ok: false, error: 'FORGOT_DISABLED'});
+    }
+    if (!smsReady()) {
+      return res.status(503).json({ok: false, error: 'SMS_NOT_CONFIGURED'});
+    }
     if (loginLocked(id)) {
       return res.status(429).json({ok: false, error: 'ACCOUNT_LOCKED'});
-    }
-    const pwProblem = passwordProblem(newPassword);
-    if (pwProblem != null) {
-      return res.status(400).json({ok: false, error: pwProblem});
     }
     const user = m.userByIdNumber.get(id);
     if (user == null || user.disabled ||
@@ -1532,14 +1640,80 @@ function buildMarketRouter() {
       recordLoginFail(id);
       return res.status(403).json({ok: false, error: 'BAD_CREDENTIALS'});
     }
+    if (resetCodeRateExceeded(user.id)) {
+      return res.status(429).json({ok: false, error: 'TOO_MANY_CODES'});
+    }
+
+    const code = String(crypto.randomInt(100000, 1000000));
+    const now = Date.now();
+    const message =
+      'سيلا ماركت — رمز استعادة كلمة المرور: ' + code +
+      ' (صالح 10 دقائق). لا تشاركه مع أحد.';
+    const provider = getSetting('sms_provider', '');
+    const s = smsSettings();
+    // إرسال متزامن مقصود: نجاح الطلب = رسالة انطلقت فعلاً.
+    // eslint-disable-next-line no-undef
+    sendSms(provider, s, user.phone, message).then((result) => {
+      if (!result.ok) {
+        audit('market_forgot_sms_failed', {
+          ip: req.ip, details: {userId: user.id, provider, detail: result.detail},
+        });
+        res.status(502).json({ok: false, error: 'SMS_SEND_FAILED'});
+        return;
+      }
+      db.prepare(
+        'INSERT INTO market_reset_codes (user_id, code_hash, attempts, created_at, expires_at) VALUES (?, ?, 0, ?, ?)',
+      ).run(user.id, hashResetCode(code), now, now + RESET_CODE_TTL_MS);
+      recordResetCodeRequest(user.id);
+      clearLoginFails(id);
+      audit('market_forgot_code_sent', {ip: req.ip, details: {userId: user.id}});
+      res.json({ok: true, expiresInSeconds: RESET_CODE_TTL_MS / 1000});
+    });
+  });
+
+  /* ── v5.0: نسيت كلمة المرور — خطوة 2: الرمز + الكلمة الجديدة.
+   * عند النجاح: تعيين الكلمة، إبطال كل الجلسات ومسح الرموز —
+   * لا جلسة تلقائية في الرد (المستخدم يسجل الدخول بكلمته الجديدة:
+   * خطوة تحقق فعلية ثانية لا يمكن الاكتفاء بسرقة رمز واحد). */
+  router.post('/auth/forgot/verify', (req, res) => {
+    const {idNumber, phone, code, newPassword} = req.body || {};
+    const id = String(idNumber || '').replace(/\s+/g, '');
+    const pwProblem = passwordProblem(newPassword);
+    if (pwProblem != null) {
+      return res.status(400).json({ok: false, error: pwProblem});
+    }
+    if (loginLocked(id)) {
+      return res.status(429).json({ok: false, error: 'ACCOUNT_LOCKED'});
+    }
+    const user = m.userByIdNumber.get(id);
+    if (user == null || user.disabled ||
+        String(user.phone) !== String(phone || '').replace(/[\s-]/g, '')) {
+      recordLoginFail(id);
+      return res.status(403).json({ok: false, error: 'BAD_CREDENTIALS'});
+    }
+    if (!/^\d{6}$/.test(String(code || ''))) {
+      return res.status(400).json({ok: false, error: 'BAD_CODE'});
+    }
+    const row = db.prepare(
+      'SELECT * FROM market_reset_codes WHERE user_id = ? ORDER BY id DESC LIMIT 1',
+    ).get(user.id);
+    if (row == null || row.expires_at < Date.now() || row.attempts >= RESET_MAX_ATTEMPTS) {
+      return res.status(403).json({ok: false, error: 'BAD_CODE'});
+    }
+    if (!verifyResetCode(String(code), row.code_hash)) {
+      db.prepare('UPDATE market_reset_codes SET attempts = attempts + 1 WHERE id = ?').run(row.id);
+      recordLoginFail(id);
+      return res.status(403).json({ok: false, error: 'BAD_CODE'});
+    }
     const now = Date.now();
     db.transaction(() => {
       m.setUserPassword.run(hashPassword(newPassword), now, user.id);
       m.deleteTokensOfUser.run(user.id);
+      db.prepare('DELETE FROM market_reset_codes WHERE user_id = ?').run(user.id);
     })();
     clearLoginFails(id);
-    audit('market_password_reset', {ip: req.ip, details: {userId: user.id}});
-    res.json({ok: true, token: issueToken(user), user: {name: user.name, idNumber: user.id_number}});
+    audit('market_forgot_verified', {ip: req.ip, details: {userId: user.id}});
+    res.json({ok: true});
   });
 
   /* ── الطلبات ───────────────────────────────────────────────── */
@@ -2002,6 +2176,118 @@ function buildMarketAdminRouter() {
     audit('admin_market_user_disable', {adminId: req.adminUser.id, ip: req.ip,
       details: {userId: id, disabled}});
     res.json({ok: true});
+  });
+
+  /* ── v5.0: إعادة تعيين كلمة مرور مستخدم من الإدارة ───────────
+   * المسار الرسمي للاستعادة (طلب المالك): المستخدم الناسي يتواصل
+   * مع الإدارة، والإدارة تعيّن كلمة مؤقتة هنا — تُبطَل كل جلساته
+   * فوراً ويسجل الدخول بكلمته الجديدة. */
+  router.post('/users/:id/reset-password', (req, res) => {
+    const id = Number(req.params.id);
+    const user = m.userById.get(id);
+    if (!user) return res.status(404).json({ok: false, error: 'NOT_FOUND'});
+    const body = req.body || {};
+    let password = String(body.password || '');
+    // توليد كلمة مؤقتة ذكية إن لم تُرسل: 10 محارف بحرفين ورقمين مضمونين.
+    if (password === '') {
+      const alphabet = 'abcdefghjkmnpqrstuvwxyz';
+      let gen = '';
+      for (let i = 0; i < 6; i++) {
+        gen += alphabet[crypto.randomInt(0, alphabet.length)];
+      }
+      password = 'Sm' + gen + crypto.randomInt(10, 100);
+    }
+    const pwProblem = passwordProblem(password);
+    if (pwProblem != null) return res.status(400).json({ok: false, error: pwProblem});
+    const now = Date.now();
+    db.transaction(() => {
+      m.setUserPassword.run(hashPassword(password), now, user.id);
+      m.deleteTokensOfUser.run(user.id);
+      db.prepare('DELETE FROM market_reset_codes WHERE user_id = ?').run(user.id);
+    })();
+    audit('admin_market_user_reset_password', {adminId: req.adminUser.id, ip: req.ip,
+      details: {userId: user.id}});
+    res.json({ok: true, password});
+  });
+
+  /* ── v5.0: إعدادات أمن السوق (نسيت كلمة المرور + مزود SMS) ── */
+  router.get('/security', (_req, res) => {
+    const {PROVIDER_FIELDS, maskSecret} = require('./sms');
+    const provider = getSetting('sms_provider', '');
+    const providerFields = PROVIDER_FIELDS[provider] || [];
+    // الأسرار تُرد مُقنّعة — اللوحة تعرض آخر محرفين فقط، ولا تُكتب
+    // أبداً إلا إذا غيّرها المالك صراحة (القناع يبدأ بـ ••••).
+    const masked = {};
+    for (const f of providerFields) {
+      const v = getSetting(f.key, '');
+      const isSecret = /password|token/i.test(f.key);
+      masked[f.key] = isSecret ? maskSecret(v) : v;
+    }
+    res.json({
+      ok: true,
+      forgotEnabled: getSetting('market_forgot_enabled', '0') === '1',
+      contactPhone: getSetting('market_contact_phone', ''),
+      provider,
+      providers: Object.keys(PROVIDER_FIELDS),
+      fields: providerFields,
+      values: masked,
+      ready: smsReady(),
+    });
+  });
+
+  router.put('/security', (req, res) => {
+    const {PROVIDER_FIELDS} = require('./sms');
+    const b = req.body || {};
+    if (b.forgotEnabled !== undefined) {
+      setSetting('market_forgot_enabled', b.forgotEnabled ? '1' : '0');
+    }
+    if (typeof b.contactPhone === 'string') {
+      setSetting('market_contact_phone', b.contactPhone.trim().slice(0, 24));
+    }
+    if (typeof b.provider === 'string') {
+      const valid = Object.keys(PROVIDER_FIELDS);
+      if (b.provider !== '' && !valid.includes(b.provider)) {
+        return res.status(400).json({ok: false, error: 'BAD_PROVIDER'});
+      }
+      setSetting('sms_provider', b.provider.trim());
+    }
+    // الحقول: نكتب فقط ما أُرسل غير مقنّع (القناع يبدأ بـ ••••).
+    const allFields = new Set();
+    for (const list of Object.values(PROVIDER_FIELDS)) {
+      for (const f of list) {
+        allFields.add(f);
+      }
+    }
+    if (b.values && typeof b.values === 'object') {
+      for (const f of allFields) {
+        const v = b.values[f.key];
+        if (typeof v === 'string' && !v.startsWith('••')) {
+          setSetting(f.key, v.trim().slice(0, 500));
+        }
+      }
+    }
+    audit('admin_market_security_update', {adminId: req.adminUser.id, ip: req.ip,
+      details: {forgotEnabled: b.forgotEnabled, provider: b.provider}});
+    res.json({ok: true, ready: smsReady()});
+  });
+
+  /* ── v5.0: رسالة اختبار للمزود المُعدّ — يتحقق المالك من بياناته
+   * قبل تفعيل التدفق للعلن. */
+  router.post('/security/test-sms', (req, res) => {
+    const phone = String((req.body || {}).phone || '').trim();
+    if (!/^\+?\d[\d\s-]{5,19}$/.test(phone)) {
+      return res.status(400).json({ok: false, error: 'BAD_PHONE'});
+    }
+    const provider = getSetting('sms_provider', '');
+    if (!provider) return res.status(400).json({ok: false, error: 'NO_PROVIDER'});
+    const s = smsSettings();
+    sendSms(provider, s, phone,
+      'سيلا ماركت — رسالة اختبار من لوحة الإدارة. بيانات المزود تعمل بنجاح.')
+      .then((result) => {
+        audit('admin_market_sms_test', {adminId: req.adminUser.id, ip: req.ip,
+          details: {provider, ok: result.ok, detail: result.detail}});
+        res.json(result);
+      });
   });
 
   router.get('/orders', (req, res) => {

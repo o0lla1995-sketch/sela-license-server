@@ -242,6 +242,22 @@ const DEFAULT_SETTINGS = {
   site_footer_note: LANDING_CONTENT_V2.footerNote,
   site_seo_description: LANDING_CONTENT_V2.seo,
   landing_features: JSON.stringify(LANDING_CONTENT_V2.features),
+  // ── v5.0: أمن حسابات سيلا ماركت ─────────────────────────────
+  // «نسيت كلمة المرور» مطفأ افتراضياً بقرار المالك: الاستعادة عبر
+  // الإدارة فقط (إعادة تعيين من قسم مستخدمي المتجر). تفعيله يظهر
+  // مسار رمز SMS في التطبيق — يتطلب مزوداً مُعداً أيضاً (sms.js).
+  market_forgot_enabled: '0',
+  sms_provider: '',
+  sms_username: '',
+  sms_password: '',
+  sms_sender: '',
+  sms_app_sid: '',
+  sms_account_sid: '',
+  sms_auth_token: '',
+  sms_generic_url: '',
+  sms_generic_method: 'POST',
+  sms_generic_body: '',
+  market_contact_phone: '',
 };
 {
   const insertDefault = db.prepare(

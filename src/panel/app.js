@@ -1765,6 +1765,44 @@ async function viewMarket() {
     '</td></tr>'
   ).join('');
 
+  /* v5.0 — بطاقات جوال للمتاجر: الجداول مخفية تحت 820px (تصميم
+   * الجوال) لكن هذا القسم لم يكن يبني بديلاً — فكان المالك على
+   * هاتفه يرى الإحصائيات فقط بلا أي متجر (السبب الجذري لشكوى
+   * «لا تظهر جداول المتاجر»). نفس أزرار الجدول بعينها عبر data-*. */
+  const storeCards = (stores.stores || []).map((s) =>
+    '<div class="mcard">' +
+    '<div class="m-top">' +
+    '<span class="m-title" style="display:flex;align-items:center;gap:8px">' +
+    storeAvatarHtml(s.logo_url, s.name, 30) + esc(s.name) + '</span>' +
+    (s.published
+      ? '<span class="badge green">منشور</span>'
+      : '<span class="badge">مخفي</span>') +
+    '</div>' +
+    '<div class="m-rows">' +
+    '<div class="r"><span>الاشتراك</span><b>' +
+      (s.subscriptionActive
+        ? '<span class="badge green">فعّال</span>'
+        : '<span class="badge red">منتهي</span>') + '</b></div>' +
+    '<div class="r"><span>المنتجات</span><b>' + (s.products_count || 0) +
+      (s.offers_count > 0 ? ' <span class="badge orange">' + s.offers_count + ' عرض</span>' : '') + '</b></div>' +
+    '<div class="r"><span>التقييم</span><b>' + (s.rating_count
+      ? (Number(s.rating_avg) || 0).toFixed(1) + ' ★ (' + s.rating_count + ')'
+      : '—') + '</b></div>' +
+    '<div class="r"><span>الطلبات</span><b>' + (s.orders_count || 0) +
+      (s.new_orders > 0 ? ' <span class="badge amber">' + s.new_orders + ' جديد</span>' : '') + '</b></div>' +
+    '<div class="r"><span>الرقم</span><b class="mono" dir="ltr">' + esc(s.store_number) + '</b></div>' +
+    '</div>' +
+    '<div class="m-actions">' +
+    '<button class="btn small" data-mfull="' + s.id + '">بطاقة المتجر</button>' +
+    '<button class="btn ghost small" data-morders="' + s.id + '">الطلبات</button>' +
+    (s.published
+      ? '<button class="btn danger small" data-munpublish="' + s.id + '">إخفاء</button>'
+      : (s.subscriptionActive
+        ? '<button class="btn success small" data-mpublish="' + s.id + '">نشر</button>'
+        : '')) +
+    '</div></div>'
+  ).join('');
+
   $('#view').innerHTML =
     '<div class="page-head"><div><h1>المتاجر والطلبات (البيع أونلاين)</h1>' +
     '<div class="sub">إدارة متاجر نقاط البيع في منصة سيلا ماركت — البطاقات، العروض، التقييمات والمستخدمون</div></div></div>' +
@@ -1788,7 +1826,8 @@ async function viewMarket() {
       ? '<div class="table-wrap"><table class="tbl"><thead><tr>' +
         '<th>المتجر</th><th>النشر</th><th>الاشتراك</th><th>منتجات</th>' +
         '<th>التقييم</th><th>طلبات</th><th>آخر تحديث</th><th></th>' +
-        '</tr></thead><tbody>' + storeRows + '</tbody></table></div>'
+        '</tr></thead><tbody>' + storeRows + '</tbody></table></div>' +
+        '<div class="cards-list">' + storeCards + '</div>'
       : '<div class="empty">لا متاجر بعد — تُنشأ تلقائياً عندما يفعّل التاجر «البيع أونلاين» من تطبيق نقطة البيع</div>') +
     '</div>' +
 
@@ -1850,10 +1889,36 @@ async function viewMarketUsers() {
     '<td class="num">' + (u.ratings_count || 0) + '</td>' +
     '<td class="dim tiny">' + esc(fmtDateTime(u.last_seen_at)) + '</td>' +
     '<td class="actions">' +
+    '<button class="btn ghost small" data-ureset="' + u.id + '" data-ureset-name="' + esc(u.name || '') + '">كلمة مرور</button> ' +
     (u.disabled
       ? '<button class="btn success small" data-uenable="' + u.id + '">تفعيل</button>'
       : '<button class="btn danger small" data-udisable="' + u.id + '">تعطيل</button>') +
     '</td></tr>'
+  ).join('');
+
+  /* v5.0 — بطاقات جوال للمستخدمين (الجداول مخفية تحت 820px) مع
+   * زر إعادة تعيين كلمة المرور: الاستعادة الرسمية بعد إزالة
+   * «نسيت كلمة المرور» الذاتية (ثغرة الهوية+الهاتف). */
+  const userCards = users.map((u) =>
+    '<div class="mcard' + (u.disabled ? ' row-off' : '') + '">' +
+    '<div class="m-top"><span class="m-title">' + esc(u.name || 'مستخدم سيلا') + '</span>' +
+    (u.disabled ? '<span class="badge red">معطّل</span>' : '<span class="badge green">نشط</span>') +
+    '</div>' +
+    '<div class="m-rows">' +
+    '<div class="r"><span>الهاتف</span><b class="mono" dir="ltr">' + esc(u.phone || '') + '</b></div>' +
+    '<div class="r"><span>رقم الهوية</span><b class="mono" dir="ltr">' + esc(u.id_number || '') + '</b></div>' +
+    '<div class="r"><span>الطلبات</span><b>' + (u.orders_count || 0) +
+      (u.delivered_count > 0 ? ' (' + u.delivered_count + ' مُسلّم)' : '') + '</b></div>' +
+    '<div class="r"><span>العناوين</span><b>' + (u.addresses_count || 0) + '</b></div>' +
+    '<div class="r"><span>التقييمات</span><b>' + (u.ratings_count || 0) + '</b></div>' +
+    '<div class="r"><span>آخر ظهور</span><b>' + esc(fmtDateTime(u.last_seen_at)) + '</b></div>' +
+    '</div>' +
+    '<div class="m-actions">' +
+    '<button class="btn ghost small" data-ureset="' + u.id + '" data-ureset-name="' + esc(u.name || '') + '">كلمة مرور</button>' +
+    (u.disabled
+      ? '<button class="btn success small" data-uenable="' + u.id + '">تفعيل</button>'
+      : '<button class="btn danger small" data-udisable="' + u.id + '">تعطيل</button>') +
+    '</div></div>'
   ).join('');
 
   $('#view').innerHTML =
@@ -1872,9 +1937,61 @@ async function viewMarketUsers() {
       ? '<div class="table-wrap"><table class="tbl"><thead><tr>' +
         '<th>المستخدم</th><th>الهاتف</th><th>رقم الهوية</th><th>طلبات</th>' +
         '<th>عناوين</th><th>تقييمات</th><th>آخر ظهور</th><th></th>' +
-        '</tr></thead><tbody>' + rows + '</tbody></table></div>'
+        '</tr></thead><tbody>' + rows + '</tbody></table></div>' +
+        '<div class="cards-list">' + userCards + '</div>'
       : '<div class="empty">لا مستخدمين بعد — يُنشؤون حساباتهم من تطبيق سيلا ماركت</div>') +
     '</div>';
+
+  /* v5.0: إعادة تعيين كلمة مرور مستخدم — توليد كلمة مؤقتة (أو
+   * كلمة يختارها المالك)، إبطال كل جلساته، وعرضها للنسخ مرة
+   * واحدة. المستخدم الناسي يتواصل مع الإدارة — هذا مساره. */
+  $$('[data-ureset]').forEach((b) => {
+    b.onclick = () => {
+      const userId = b.getAttribute('data-ureset');
+      const userName = b.getAttribute('data-ureset-name') || 'المستخدم';
+      showModal(
+        '<h3>إعادة تعيين كلمة المرور</h3>' +
+        '<p class="dim" style="font-size:13.5px">' + esc(userName) +
+        ' — اترك الحقل فارغاً لتوليد كلمة مؤقتة تلقائياً. ستُبطَل كل جلساته المفتوحة فوراً.</p>' +
+        '<div class="field"><label>كلمة مرور جديدة (اختياري — 8+ محارف برقم وحرف)</label>' +
+        '<input class="input" id="urNewPass" type="text" dir="ltr" placeholder="اتركه فارغاً للتوليد التلقائي"></div>' +
+        '<div class="modal-actions">' +
+        '<button class="btn ghost" id="urCancel">إلغاء</button>' +
+        '<button class="btn primary" id="urGo">تعيين</button>' +
+        '</div>'
+      );
+      $('#urCancel').onclick = closeModal;
+      $('#urGo').onclick = async () => {
+        const btn = $('#urGo');
+        btn.disabled = true;
+        btn.textContent = 'جارٍ…';
+        try {
+          const res = await api('/market/users/' + userId + '/reset-password', {
+            method: 'POST',
+            body: {password: $('#urNewPass').value.trim()},
+          });
+          closeModal();
+          showModal(
+            '<h3>تم تعيين كلمة المرور</h3>' +
+            '<p class="dim" style="font-size:13.5px">أوصلها للمستخدم عبر قناة موثوقة — لن تظهر مرة أخرى:</p>' +
+            '<div class="flex"><input class="input grow mono" id="urPass" readonly dir="ltr" value="' + esc(res.password) + '">' +
+            '<button class="btn ghost" id="urCopy">نسخ</button></div>' +
+            '<div class="modal-actions"><button class="btn primary" id="urDone">تم</button></div>'
+          );
+          $('#urCopy').onclick = () => {
+            copyText(res.password)
+              .then(() => toast('تم النسخ', 'success'))
+              .catch(() => toast('تعذر النسخ — انسخه يدوياً', 'error'));
+          };
+          $('#urDone').onclick = closeModal;
+        } catch (err) {
+          btn.disabled = false;
+          btn.textContent = 'تعيين';
+          showErr(err);
+        }
+      };
+    };
+  });
 
   $$('[data-udisable]').forEach((b) => {
     b.onclick = () =>
@@ -2085,6 +2202,7 @@ async function loadMarketOrders(storeId) {
 
 async function viewSettings() {
   const cfg = await api('/config');
+  const sec = await api('/market/security').catch(() => null);
 
   const panelPath = location.pathname.replace(/\/+$/, '');
 
@@ -2130,6 +2248,53 @@ async function viewSettings() {
     '<button class="btn primary" id="stSaveUrl">حفظ الرابط</button></div>' +
     '<p class="dim tiny mt">ملاحظات مهمة: <b>الخادم الجديد يجب أن يستخدم نفس قاعدة البيانات ونفس مفتاح التوقيع</b> حتى لا تُرفض التراخيص. أبقِ هذا الخادم القديم يعمل حتى تنتقل الأجهزة كلها (يظهر العداد في لوحة المعلومات)، ثم يمكنك إخلاء الحقل لتفريغه.</p>' +
     '</div>' +
+
+    /* v5.0 — أمن حسابات سيلا ماركت: مفتاح «نسيت كلمة المرور» +
+     * مزود الرسائل القصيرة متعدد المزودين + رسالة اختبار. */
+    (sec ? (
+    '<div class="card"><div class="card-title">' +
+    '<svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><rect x="5" y="10.5" width="14" height="10" rx="2.5"/><path d="M8 10.5V7a4 4 0 0 1 8 0v3.5"/></svg>' +
+    'أمن حسابات سيلا ماركت (نسيت كلمة المرور والرسائل القصيرة)</div>' +
+
+    '<div class="flex wrap" style="gap:10px;align-items:center;margin-bottom:12px">' +
+    '<label class="chips" style="gap:8px"><input type="checkbox" id="secForgot" ' +
+    (sec.forgotEnabled ? 'checked' : '') + '> إظهار «نسيت كلمة المرور» في التطبيق (يتطلب مزوداً مكتملًا أدناه)</label>' +
+    '<span class="badge ' + (sec.ready ? 'green' : 'amber') + '">' +
+    (sec.ready ? 'المزود جاهز' : 'المزود غير مكتمل') + '</span>' +
+    '</div>' +
+    '<p class="dim tiny mb">عند الإيقاف (الموصى به حالياً): زر «نسيت كلمة المرور؟» في التطبيق يعرض «تواصل مع الإدارة» — والاستعادة تتم من قسم مستخدمي المتجر بزر «كلمة مرور». عند التشغيل: رمز SMS يصل لجوال المستخدم المسجل فقط (صلاحية 10 دقائق) ثم يعيّن كلمته الجديدة بنفسه.</p>' +
+
+    '<div class="row-2">' +
+    '<div class="field"><label>مزود الرسائل القصيرة</label>' +
+    '<select class="input" id="secProvider">' +
+    '<option value="">— بدون مزود —</option>' +
+    (sec.providers || []).map((p) =>
+      '<option value="' + esc(p) + '"' + (sec.provider === p ? ' selected' : '') + '>' +
+      esc({hisms: 'Hisms (hisms.sa)', moltasms: 'MoltaSMS (moltasms.net)',
+           unifonic: 'Unifonic', twilio: 'Twilio', generic: 'بوابة HTTP مخصصة'}[p] || p) +
+      '</option>').join('') +
+    '</select></div>' +
+    '<div class="field"><label>رقم تواصل الإدارة (يظهر بالتطبيق عند إيقاف الاستعادة)</label>' +
+    '<input class="input" id="secContactPhone" dir="ltr" maxlength="24" value="' + esc(sec.contactPhone || '') + '"></div>' +
+    '</div>' +
+
+    '<div id="secFields" class="row-2" style="margin-top:4px">' +
+    ((sec.fields || []).map((f) =>
+      '<div class="field"><label>' + esc(f.label) + '</label>' +
+      '<input class="input" id="secf_' + esc(f.key) + '" dir="ltr" ' +
+      'value="' + esc((sec.values || {})[f.key] || '') + '" ' +
+      (f.key === 'sms_generic_body' ? 'placeholder=\'{"to":"{phone}","text":"{message}"}\'' : '') +
+      '></div>'
+    ).join('') || '<p class="dim tiny">اختر مزوداً لتظهر حقوله.</p>') +
+    '</div>' +
+
+    '<div class="flex wrap" style="gap:8px;margin-top:14px">' +
+    '<button class="btn primary" id="secSave">حفظ إعدادات الأمان</button>' +
+    '<input class="input" id="secTestPhone" dir="ltr" placeholder="رقم للاختبار 05…" style="max-width:180px">' +
+    '<button class="btn ghost" id="secTest">إرسال رسالة اختبار</button>' +
+    '</div>' +
+    '</div>'
+    ) : '') +
 
     '<div class="card"><div class="card-title">' +
     '<svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>' +
@@ -2194,6 +2359,55 @@ async function viewSettings() {
       showErr(err.message === 'BAD_CREDENTIALS' ? 'كلمة المرور الحالية غير صحيحة' : err);
     }
   };
+
+  /* v5.0 — حفظ إعدادات أمن السوق (المفتاح + المزود + الحقول). */
+  if (sec && $('#secSave')) {
+    $('#secSave').onclick = async () => {
+      try {
+        const values = {};
+        (sec.fields || []).forEach((f) => {
+          const el = $('#secf_' + f.key);
+          if (el) values[f.key] = el.value;
+        });
+        const res = await api('/market/security', {
+          method: 'PUT',
+          body: {
+            forgotEnabled: $('#secForgot').checked,
+            contactPhone: $('#secContactPhone').value,
+            provider: $('#secProvider').value,
+            values,
+          },
+        });
+        toast(res.ready
+          ? 'حُفظت الإعدادات — المزود جاهز للعمل'
+          : 'حُفظت الإعدادات — المزود غير مكتمل بعد', 'success');
+        viewSettings().catch(showErr);
+      } catch (err) { showErr(err); }
+    };
+    $('#secTest').onclick = async () => {
+      const phone = $('#secTestPhone').value.trim();
+      if (!phone) return toast('اكتب رقم هاتف للاختبار أولاً', 'error');
+      const btn = $('#secTest');
+      btn.disabled = true;
+      btn.textContent = 'جارٍ الإرسال…';
+      try {
+        const res = await api('/market/security/test-sms', {
+          method: 'POST',
+          body: {phone},
+        });
+        if (res.ok) {
+          toast('وصلت الرسالة — المزود يعمل', 'success');
+        } else {
+          toast('فشل الإرسال: ' + (res.detail || 'راجع بيانات المزود'), 'error');
+        }
+      } catch (err) {
+        showErr(err);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'إرسال رسالة اختبار';
+      }
+    };
+  }
 }
 
 /* ═══════════════════ boot ═══════════════════ */

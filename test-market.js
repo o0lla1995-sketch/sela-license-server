@@ -328,19 +328,37 @@ async function main() {
     const ulog2 = await req('POST', '/api/market/auth/login',
       {body: {idNumber: '401234567', password: 'new-pass-5678'}});
     ok('login with changed password', ulog2.status === 200);
-    // استعادة: جوال خاطئ يُرفض، الصحيح يعيّن كلمة جديدة ويبطل الجلسات
-    const resetBad = await req('POST', '/api/market/auth/reset',
-      {body: {idNumber: '401234567', phone: '0599000000', newPassword: 'reset-pass-90'}});
-    ok('reset with wrong phone rejected', resetBad.status === 403);
-    const reset = await req('POST', '/api/market/auth/reset',
-      {body: {idNumber: '401234567', phone: '0598765432', newPassword: 'reset-pass-90'}});
-    ok('reset ok and returns fresh token', reset.status === 200 && reset.data.token);
+    // v5.0: الاستعادة الذاتية القديمة (هوية+هاتف ⇒ تغيير فوري) أُزيلت
+    // — كانت ثغرة تتيح سرقة أي حساب بمعرفة رقمي هويته وجواله.
+    // المسارات الجديدة: config عام + رمز SMS خاضع للإدارة + إعادة
+    // تعيين من الإدارة (المسار الرسمي للاستعادة).
+    const cfg1 = await req('GET', '/api/market/config');
+    ok('market config: forgot hidden by default',
+      cfg1.status === 200 && cfg1.data.ok === true &&
+      cfg1.data.forgotPassword === false);
+    const forgotOff = await req('POST', '/api/market/auth/forgot/request',
+      {body: {idNumber: '401234567', phone: '0598765432'}});
+    ok('forgot request rejected while disabled',
+      forgotOff.status === 403 && forgotOff.data.error === 'FORGOT_DISABLED');
+    const oldResetGone = await req('POST', '/api/market/auth/reset',
+      {body: {idNumber: '401234567', phone: '0598765432', newPassword: 'stolen-pass-1'}});
+    ok('legacy /auth/reset removed (404)', oldResetGone.status === 404);
+    // إعادة التعيين الإدارية: توليد كلمة مؤقتة + إبطال كل الجلسات
+    const usersList = await req('GET', '/api/admin/market/users', {token: 'root-master-token'});
+    const targetUser = (usersList.data.users || []).find(u => u.id_number === '401234567');
+    ok('admin market users list', usersList.status === 200 && targetUser != null);
+    const adminReset = await req('POST',
+      '/api/admin/market/users/' + targetUser.id + '/reset-password',
+      {token: 'root-master-token', body: {}});
+    ok('admin reset-password generates temp password',
+      adminReset.status === 200 && typeof adminReset.data.password === 'string' &&
+      adminReset.data.password.length >= 8);
     const oldTokDead = await req('GET', '/api/market/orders', {marketToken: mtok});
-    ok('old sessions revoked after reset', oldTokDead.status === 401);
-    const mtok2 = reset.data.token;
+    ok('old sessions revoked after admin reset', oldTokDead.status === 401);
     const ulog3 = await req('POST', '/api/market/auth/login',
-      {body: {idNumber: '401234567', password: 'reset-pass-90'}});
-    ok('login after reset', ulog3.status === 200);
+      {body: {idNumber: '401234567', password: adminReset.data.password}});
+    ok('login after admin reset', ulog3.status === 200);
+    const mtok2 = ulog3.data.token;
 
     /* ── 6) الطلب ──────────────────────────────────────────── */
     // معرّفات المنتجات تُقرأ ديناميكياً — upsert ON CONFLICT يستهلك
@@ -637,7 +655,7 @@ async function main() {
     const deadSession = await req('GET', '/api/market/orders', {marketToken: mtok2});
     ok('old token dead after deletion', deadSession.status === 401);
     const deadLogin = await req('POST', '/api/market/auth/login',
-      {body: {idNumber: '401234567', password: 'reset-pass-90'}});
+      {body: {idNumber: '401234567', password: adminReset.data.password}});
     ok('deleted account cannot log in', deadLogin.status === 403);
     const reReg = await req('POST', '/api/market/auth/register',
       {body: {idNumber: '401234567', name: 'عودة أحمد', phone: '0598765432', password: 'fresh-321-pass'}});
