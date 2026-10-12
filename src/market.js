@@ -58,6 +58,7 @@ CREATE TABLE IF NOT EXISTS stores (
   whatsapp      TEXT,
   published     INTEGER NOT NULL DEFAULT 0,
   currency      TEXT NOT NULL DEFAULT 'ILS',
+  logo_image_id INTEGER REFERENCES store_images(id) ON DELETE SET NULL,
   created_at    INTEGER NOT NULL,
   updated_at    INTEGER NOT NULL,
   last_seen_at  INTEGER
@@ -86,6 +87,7 @@ CREATE TABLE IF NOT EXISTS store_products (
   sold_by_weight INTEGER NOT NULL DEFAULT 0,
   unit_label    TEXT,
   description   TEXT,
+  discount_pct  REAL NOT NULL DEFAULT 0 CHECK (discount_pct >= 0 AND discount_pct <= 95),
   available     INTEGER NOT NULL DEFAULT 1,
   updated_at    INTEGER NOT NULL,
   UNIQUE(store_id, product_ref)
@@ -148,6 +150,7 @@ CREATE TABLE IF NOT EXISTS market_orders (
   items_total_minor  INTEGER NOT NULL DEFAULT 0,
   total_minor        INTEGER NOT NULL DEFAULT 0,
   returned_minor     INTEGER NOT NULL DEFAULT 0,
+  items_discount_minor INTEGER NOT NULL DEFAULT 0,
   invoice_ref   TEXT,
   reject_reason TEXT,
   cancel_reason TEXT,
@@ -243,6 +246,23 @@ const IMAGES_DIR = path.join(
   process.env.DATA_DIR || '/data', 'market-images');
 fs.mkdirSync(IMAGES_DIR, {recursive: true});
 
+/* ── ترحيل v4.5: خصومات المنتجات + شعار المتجر + خصم أسطر الطلب.
+ *    (CREATE IF NOT EXISTS لا يضيف أعمدة لجداول منشورة قائمة). */
+(function migrateV45() {
+  const p = db.prepare('PRAGMA table_info(store_products)').all().map(c => c.name);
+  if (!p.includes('discount_pct')) {
+    db.exec('ALTER TABLE store_products ADD COLUMN discount_pct REAL NOT NULL DEFAULT 0');
+  }
+  const s = db.prepare('PRAGMA table_info(stores)').all().map(c => c.name);
+  if (!s.includes('logo_image_id')) {
+    db.exec('ALTER TABLE stores ADD COLUMN logo_image_id INTEGER REFERENCES store_images(id) ON DELETE SET NULL');
+  }
+  const o = db.prepare('PRAGMA table_info(market_orders)').all().map(c => c.name);
+  if (!o.includes('items_discount_minor')) {
+    db.exec('ALTER TABLE market_orders ADD COLUMN items_discount_minor INTEGER NOT NULL DEFAULT 0');
+  }
+})();
+
 /* ── عبارات معدّة مسبقاً (نفس انضباط db.js: تنشأ مرة واحدة) ───── */
 const m = {
   storeByKey: db.prepare('SELECT * FROM stores WHERE key_id = ?'),
@@ -264,14 +284,14 @@ const m = {
 
   upsertProduct: db.prepare(
     `INSERT INTO store_products
-       (store_id, product_ref, name, category, price_minor, stock, barcode, sold_by_weight, unit_label, description, options, available, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+       (store_id, product_ref, name, category, price_minor, stock, barcode, sold_by_weight, unit_label, description, options, discount_pct, available, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
      ON CONFLICT(store_id, product_ref) DO UPDATE SET
        name = excluded.name, category = excluded.category,
        price_minor = excluded.price_minor, stock = excluded.stock,
        barcode = excluded.barcode, sold_by_weight = excluded.sold_by_weight,
        unit_label = excluded.unit_label, description = excluded.description,
-       options = excluded.options,
+       options = excluded.options, discount_pct = excluded.discount_pct,
        available = 1, updated_at = excluded.updated_at`),
   markMissingUnavailable: db.prepare(
     `UPDATE store_products SET available = 0, updated_at = ?
@@ -302,8 +322,8 @@ const m = {
   insertOrder: db.prepare(
     `INSERT INTO market_orders
        (order_number, store_id, user_id, status, region_name, address, note,
-        delivery_fee_minor, items_total_minor, total_minor, created_at, updated_at)
-     VALUES (?, ?, ?, 'new', ?, ?, ?, ?, ?, ?, ?, ?)`),
+        delivery_fee_minor, items_total_minor, items_discount_minor, total_minor, created_at, updated_at)
+     VALUES (?, ?, ?, 'new', ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
   orderById: db.prepare('SELECT * FROM market_orders WHERE id = ?'),
   orderByNumber: db.prepare('SELECT * FROM market_orders WHERE order_number = ?'),
   ordersForStoreSince: db.prepare(
@@ -346,27 +366,35 @@ const m = {
   deleteImageRow: db.prepare('DELETE FROM store_images WHERE id = ?'),
 
   publishedStores: db.prepare(
-    `SELECT s.id, s.store_number, s.name, s.description, s.category, s.region, s.phone, s.whatsapp
+    `SELECT s.id, s.store_number, s.name, s.description, s.category, s.region, s.phone, s.whatsapp,
+            s.logo_image_id
      FROM stores s JOIN keys k ON k.id = s.key_id
      WHERE s.published = 1 AND k.revoked_at IS NULL
        AND k.plan_expires_at IS NOT NULL AND k.plan_expires_at > ?
      ORDER BY s.updated_at DESC LIMIT 500`),
   storeProductsPage: db.prepare(
     `SELECT p.id, p.product_ref, p.name, p.category, p.price_minor, p.stock, p.barcode,
-            p.sold_by_weight, p.unit_label, p.description, p.options, p.store_id
+            p.sold_by_weight, p.unit_label, p.description, p.options, p.discount_pct, p.store_id
      FROM store_products p WHERE p.store_id = ? AND p.available = 1
      ORDER BY p.name COLLATE NOCASE ASC LIMIT ? OFFSET ?`),
   storeProductsSearch: db.prepare(
     `SELECT p.id, p.product_ref, p.name, p.category, p.price_minor, p.stock, p.barcode,
-            p.sold_by_weight, p.unit_label, p.description, p.options, p.store_id
+            p.sold_by_weight, p.unit_label, p.description, p.options, p.discount_pct, p.store_id
      FROM store_products p WHERE p.store_id = ? AND p.available = 1
        AND p.name LIKE ? ESCAPE '\\'
      ORDER BY p.name COLLATE NOCASE ASC LIMIT ? OFFSET ?`),
+  /* v4.5: عروض المتجر — المخفّضة فقط مرتبة بالخصم الأكبر أولاً */
+  storeProductsOffers: db.prepare(
+    `SELECT p.id, p.product_ref, p.name, p.category, p.price_minor, p.stock, p.barcode,
+            p.sold_by_weight, p.unit_label, p.description, p.options, p.discount_pct, p.store_id
+     FROM store_products p
+     WHERE p.store_id = ? AND p.available = 1 AND p.discount_pct > 0
+     ORDER BY p.discount_pct DESC, p.updated_at DESC LIMIT ? OFFSET ?`),
   storeProductByIds: db.prepare(
     `SELECT * FROM store_products WHERE store_id = ? AND available = 1 AND id = ?`),
   crossProducts: db.prepare(
     `SELECT p.id, p.product_ref, p.name, p.category, p.price_minor, p.stock, p.barcode,
-            p.sold_by_weight, p.unit_label, p.options, p.store_id, s.name AS store_name, s.store_number
+            p.sold_by_weight, p.unit_label, p.options, p.discount_pct, p.store_id, s.name AS store_name, s.store_number
      FROM store_products p
      JOIN stores s ON s.id = p.store_id
      JOIN keys k ON k.id = s.key_id
@@ -377,7 +405,7 @@ const m = {
   // واحد مُعدّ مسبقاً: المعامل الفارغ يعطّل الفلتر (لا تضاعف للعبارات).
   crossProductsFiltered: db.prepare(
     `SELECT p.id, p.product_ref, p.name, p.category, p.price_minor, p.stock, p.barcode,
-            p.sold_by_weight, p.unit_label, p.options, p.store_id, s.name AS store_name, s.store_number
+            p.sold_by_weight, p.unit_label, p.options, p.discount_pct, p.store_id, s.name AS store_name, s.store_number
      FROM store_products p
      JOIN stores s ON s.id = p.store_id
      JOIN keys k ON k.id = s.key_id
@@ -397,7 +425,7 @@ const m = {
 
   /* ── v4.4: متاجر تخدم منطقة محددة (مع رسم توصيلها لها) ──── */
   publishedStoresInRegion: db.prepare(
-    `SELECT s.id, s.store_number, s.name, s.description, s.category, s.region,
+    `SELECT s.id, s.store_number, s.name, s.description, s.category, s.region, s.logo_image_id,
             s.phone, s.whatsapp, r.fee_minor AS region_fee_minor
      FROM stores s
      JOIN store_delivery_regions r ON r.store_id = s.id AND r.enabled = 1 AND r.name = ?
@@ -554,14 +582,58 @@ function imageUrl(row) {
   return `/api/market/img/${row.store_id}/${row.hash}.${row.ext}`;
 }
 
-/** يلحق images: [urls] بصفوف منتجات (استدعاء واحد لكل منتج —
- *  الصفحات ≤100 منتج، وكل استدعاء عبارة معدّة مسبقاً). */
-function attachImages(rows) {
-  for (const row of rows) {
-    row.images = m.imagesOfProducts.all(row.id).map(imageUrl);
-    row.options = parseOptions(row.options);
+/* ── v4.5: JSON مُدمج للمنتجات ──────────────────────────────────
+ *  سبب الجذري لاختفاء المنتجات من التطبيق على شبكات الجوال: كل
+ *  الحمولات التي كانت تعمل <~430B (متاجر 284B، تفاصيل متجر ~430B)
+ *  بينما قوائم المنتجات ~2KB — إطارات TCP متعددة تنكسر على مسلك
+ *  الشبكة. الحل: حذف كل حقل فارغ (null/0/[]) فتنزل القائمة تحت
+ *  حد الإطار الواحد، مع سقف per=1 على الخادم يسمح للتطبيق بتفكيك
+ *  الطلب لصفحات صغيرة عند التعثر (سلم 12→6→3→1). */
+function finalMinor(product) {
+  const pct = Number(product.discount_pct) || 0;
+  if (pct <= 0) return product.price_minor;
+  return Math.max(0, Math.round(product.price_minor * (1 - pct / 100)));
+}
+
+/** يحوّل صف منتج إلى كائن JSON مُدمج — الحقول الفارغة تُحذف تماماً
+ *  (التطبيق يقرأها بـ ?. و?? فالغياب = القيمة المحايدة نفسها). */
+function productJson(row, opts) {
+  const cross = opts != null && opts.cross === true;
+  const out = {
+    id: row.id,
+    name: row.name,
+    price_minor: row.price_minor,
+    stock: row.stock,
+    store_id: row.store_id,
+  };
+  if (row.sold_by_weight) out.sold_by_weight = 1;
+  if (row.category) out.category = row.category;
+  if (row.barcode) out.barcode = row.barcode;
+  if (row.unit_label) out.unit_label = row.unit_label;
+  if (row.description) out.description = row.description;
+  if (row.product_ref) out.product_ref = row.product_ref;
+  const options = parseOptions(row.options);
+  if (options) out.options = options;
+  const pct = Number(row.discount_pct) || 0;
+  if (pct > 0) {
+    out.discount_pct = pct;
+    out.final_minor = finalMinor(row);
   }
-  return rows;
+  const images = m.imagesOfProducts.all(row.id).map(imageUrl);
+  if (images.length > 0) out.images = images;
+  if (cross) {
+    out.store_name = row.store_name;
+    out.store_number = row.store_number;
+  }
+  return out;
+}
+
+/** v4.5: رابط شعار المتجر العمومي أو null. */
+function storeLogoUrl(store) {
+  if (store.logo_image_id == null) return null;
+  const img = m.imageById.get(store.logo_image_id);
+  if (img == null || img.store_id !== store.id) return null;
+  return imageUrl(img);
 }
 
 /** فحص البصمة السحرية للصورة المستقبلة + حد الحجم. */
@@ -585,6 +657,27 @@ function decodeUpload(up) {
   }
   return {hash, ext, buf, width: Math.round(Number(up.width)) || null,
     height: Math.round(Number(up.height)) || null};
+}
+
+/** v4.5: مثل decodeUpload لكن يُحسب الهاش على الخادم — لشعار
+ *  المتجر الذي يرفعه POS بلا مكتبة تشفير على الجهاز. */
+function decodeUploadServerHash(up) {
+  if (up == null || typeof up !== 'object') return null;
+  const ext = String(up.ext || 'webp').toLowerCase();
+  const data = String(up.data || '');
+  if (!['webp', 'jpg'].includes(ext)) return null;
+  const buf = Buffer.from(data, 'base64');
+  if (buf.length < 64 || buf.length > IMAGE_MAX_BYTES) return null;
+  const isWebp = buf.length > 12 && buf[0] === 0x52 && buf[1] === 0x49 &&
+    buf[2] === 0x46 && buf[3] === 0x46 && buf[8] === 0x57 && buf[9] === 0x45;
+  const isJpg = buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff;
+  if (ext === 'webp' ? !isWebp : !isJpg) return null;
+  return {
+    hash: crypto.createHash('sha256').update(buf).digest('hex'),
+    ext, buf,
+    width: Math.round(Number(up.width)) || null,
+    height: Math.round(Number(up.height)) || null,
+  };
 }
 
 /** ORD-YYYYMMDD-XXXXXX — اليوم + 6 محارف عشوائية (تصادم شبه مستحيل،
@@ -726,6 +819,48 @@ function buildStoreRouter() {
       }
     })();
 
+    /* v4.5: شعار المتجر — يُرفع هنا (يُحسب الهاش على الخادم).
+     *  logo: {data, ext, width, height} → تخزين content-addressed
+     *  وربطه بعمود stores.logo_image_id. logo: null → إزالة الشعار.
+     *  غياب الحقل تماماً → لا تغيير (idempotent). */
+    let logoUrl = null;
+    if (req.body && 'logo' in (req.body || {})) {
+      const logo = req.body.logo;
+      if (logo == null) {
+        db.prepare('UPDATE stores SET logo_image_id = NULL, updated_at = ? WHERE id = ?')
+          .run(now, storeId);
+      } else {
+        const decoded = decodeUploadServerHash(logo);
+        if (decoded != null) {
+          const storeDir = path.join(IMAGES_DIR, String(storeId));
+          fs.mkdirSync(storeDir, {recursive: true});
+          let imageId;
+          const existing = m.imageByStoreHash.get(storeId, decoded.hash);
+          if (existing != null) {
+            imageId = existing.id; // dedupe — نفس الشعار بلا إعادة تخزين
+          } else {
+            const file = path.join(storeDir, `${decoded.hash}.${decoded.ext}`);
+            fs.writeFileSync(file, decoded.buf);
+            m.insertImage.run(
+              storeId, decoded.hash, decoded.ext, decoded.buf.length,
+              decoded.width, decoded.height, now);
+            // INSERT OR IGNORE: بعد الإدراج نقرأ الصف عبر الهاش — لا
+            // last_insert_rowid (قد يعيد صفقاً قديماً لو تجاهل الإدراج).
+            const row = m.imageByStoreHash.get(storeId, decoded.hash);
+            if (row == null) {
+              return res.status(500).json({ok: false, error: 'LOGO_STORE_FAILED'});
+            }
+            imageId = row.id;
+          }
+          db.prepare('UPDATE stores SET logo_image_id = ?, updated_at = ? WHERE id = ?')
+            .run(imageId, now, storeId);
+          logoUrl = imageUrl(m.imageById.get(imageId));
+        } else {
+          return res.status(400).json({ok: false, error: 'BAD_LOGO'});
+        }
+      }
+    }
+
     audit('store_register', {
       keyId: auth.keyRow.id,
       deviceId: auth.payload.deviceId,
@@ -739,6 +874,7 @@ function buildStoreRouter() {
         id: fresh.id,
         storeNumber: fresh.store_number,
         published: fresh.published === 1,
+        logoUrl,
       },
       serverTime: now,
     });
@@ -761,6 +897,8 @@ function buildStoreRouter() {
           continue;
         }
         const priceMinor = Math.max(0, Math.min(100000000, Math.round(Number(p.priceMinor) || 0)));
+        // v4.5: خصم المنتج — نسبة مئوية 0–95 تُحسب عند البيع وفي المتجر
+        const discountPct = Math.max(0, Math.min(95, Number(p.discountPct) || 0));
         m.upsertProduct.run(
           auth.store.id,
           String(p.ref).slice(0, 40),
@@ -773,6 +911,7 @@ function buildStoreRouter() {
           String(p.unitLabel || '').trim().slice(0, 20) || null,
           String(p.description || '').trim().slice(0, 300) || null,
           normalizeOptions(p.options),
+          discountPct,
           now,
         );
         saved += 1;
@@ -788,14 +927,17 @@ function buildStoreRouter() {
     });
   });
 
-  /* ── images/sync: صور المنتجات (v4.2) ─────────────────────────
+  /* ── images/sync: صور المنتجات (v4.2، موسّعة v4.5) ────────────
    * منفصلة عن مزامنة الكتالوج كي تبقى الأخيرة خفيفة سريعة.
    * POS يضغط الصور إلى WebP (~800px، ~40–120KB) قبل الإرسال،
    * والخادم يخزنها موجّهةً بالمحتوى (sha256) فيملك:
    *   • إرسال الهاش فقط للصور غير المتغيرة (بلا رفع متكرر)؛
    *   • كاش HTTP دائم لأن الرابط يحمل الهاش (immutable).
    * الطلب: images: [{ref, items: [{hash, slot}]}], uploads: [{hash, ext, data, width, height}]
-   * كل منتج يستبدل روابطه بالكامل بالقائمة المرسلة (idempotent). */
+   * كل منتج يستبدل روابطه بالكامل بالقائمة المرسلة (idempotent).
+   * v4.5: item قد يكون رفعاً مضمّناً {data, ext, width, height, slot}
+   * بدل {hash, slot} — يُخزَّن ويُربط بنداء واحد بلا مكتبة تشفير
+   * على جهاز التاجر (الهاش يُحسب هنا). */
   router.post('/images/sync', (req, res) => {
     const auth = authenticate(req.body, res);
     if (!auth) return;
@@ -809,32 +951,47 @@ function buildStoreRouter() {
     const storeDir = path.join(IMAGES_DIR, String(auth.store.id));
     fs.mkdirSync(storeDir, {recursive: true});
 
-    // 1) تخزين الرفعات الجديدة (تجاوز للصور الموجودة مسبقاً بنفس الهاش)
+    /** v4.5: تخزين بايتات صورة موجّهة بالمحتوى — يعيد الصف
+     *  (dedupe عبر imageByStoreHash). null عند فشل الكتابة. */
+    function storeBytes(decoded) {
+      const existing = m.imageByStoreHash.get(auth.store.id, decoded.hash);
+      if (existing != null) {
+        return existing;
+      }
+      const file = path.join(storeDir, `${decoded.hash}.${decoded.ext}`);
+      try {
+        fs.writeFileSync(file, decoded.buf);
+      } catch (err) {
+        return null;
+      }
+      m.insertImage.run(
+        auth.store.id, decoded.hash, decoded.ext, decoded.buf.length,
+        decoded.width, decoded.height, now);
+      return m.imageByStoreHash.get(auth.store.id, decoded.hash);
+    }
+
+    // 1) تخزين الرفعات المنفصلة (تجاوز للصور الموجودة مسبقاً بنفس الهاش)
     let stored = 0;
     for (const up of uploads || []) {
       const decoded = decodeUpload(up);
       if (decoded == null) {
         return res.status(400).json({ok: false, error: 'BAD_IMAGE_DATA'});
       }
-      const existing = m.imageByStoreHash.get(auth.store.id, decoded.hash);
-      if (existing != null) {
-        continue; // dedupe — لا إعادة تخزين
+      const known = m.imageByStoreHash.get(auth.store.id, decoded.hash);
+      if (known != null) {
+        continue; // dedupe — لا إعادة تخزين ولا يُحسب stored
       }
-      const file = path.join(storeDir, `${decoded.hash}.${decoded.ext}`);
-      try {
-        fs.writeFileSync(file, decoded.buf);
-      } catch (err) {
+      const row = storeBytes(decoded);
+      if (row == null) {
         return res.status(500).json({ok: false, error: 'IMAGE_STORE_FAILED'});
       }
-      m.insertImage.run(
-        auth.store.id, decoded.hash, decoded.ext, decoded.buf.length,
-        decoded.width, decoded.height, now);
       stored += 1;
     }
 
     // 2) ربط روابط الصور بكل منتج (استبدال كامل — idempotent)
     let linked = 0;
     let missing = 0;
+    let inline = 0;
     db.transaction(() => {
       for (const entry of images) {
         if (entry == null || typeof entry.ref !== 'string') continue;
@@ -843,14 +1000,25 @@ function buildStoreRouter() {
           missing += 1;
           continue;
         }
-        const items = (Array.isArray(entry.items) ? entry.items : [])
-          .filter(it => it != null && /^[a-f0-9]{16,64}$/i.test(String(it.hash || '')))
-          .slice(0, 8);
         m.clearProductImages.run(product.id);
+        const items = (Array.isArray(entry.items) ? entry.items : [])
+          .filter(it => it != null && typeof it === 'object')
+          .slice(0, 8);
         items.forEach((it, index) => {
-          const img = m.imageByStoreHash.get(auth.store.id, String(it.hash).toLowerCase());
+          const slot = Math.max(0, Math.round(Number(it.slot) || index));
+          let img = null;
+          if (typeof it.hash === 'string' && /^[a-f0-9]{16,64}$/i.test(it.hash)) {
+            img = m.imageByStoreHash.get(auth.store.id, String(it.hash).toLowerCase());
+          } else if (typeof it.data === 'string') {
+            // v4.5: رفع مضمّن — الهاش هنا على الخادم
+            const decoded = decodeUploadServerHash(it);
+            if (decoded != null) {
+              img = storeBytes(decoded);
+              if (img != null) inline += 1;
+            }
+          }
           if (img != null) {
-            m.linkProductImage.run(product.id, img.id, Math.max(0, Math.round(Number(it.slot) || index)));
+            m.linkProductImage.run(product.id, img.id, slot);
           }
         });
         linked += 1;
@@ -858,9 +1026,12 @@ function buildStoreRouter() {
     })();
 
     // 3) كنس الصور اليتيمة (بلا أي منتج يشير إليها) — صفوف وملفات
+    // v4.5: شعار المتجر الحالي محمي من الكنس (لا يشير إليه منتج).
     let cleaned = 0;
     try {
-      const orphans = m.orphanImages.all(auth.store.id);
+      const logoImageId = m.storeById.get(auth.store.id)?.logo_image_id ?? null;
+      const orphans = m.orphanImages.all(auth.store.id)
+        .filter(o => o.id !== logoImageId);
       db.transaction(() => {
         for (const orphan of orphans) {
           m.deleteImageRow.run(orphan.id);
@@ -872,7 +1043,7 @@ function buildStoreRouter() {
       })();
     } catch (_) { /* الكنس أفضل جهد — لا يفشل النداء بسببه */ }
 
-    res.json({ok: true, stored, linked, missing, cleaned, serverTime: now});
+    res.json({ok: true, stored, linked, missing, inline, cleaned, serverTime: now});
   });
 
   /* ── orders/poll: طلبات جديدة/محدثة منذ مؤشر ─────────────── */
@@ -1060,14 +1231,21 @@ function buildMarketRouter() {
         phone: s.phone,
         whatsapp: s.whatsapp,
         deliveryFeeMinor: s.region_fee_minor,
+        logo_url: storeLogoUrl(s),
         ...(ratings.get(s.id) ?? {rating: null, ratingCount: 0}),
       }));
+      rows.forEach(r => { if (r.logo_url == null) delete r.logo_url; });
       return res.json({ok: true, stores: rows});
     }
-    const rows = m.publishedStores.all(now).map(s => ({
-      ...s,
-      ...(ratings.get(s.id) ?? {rating: null, ratingCount: 0}),
-    }));
+    const rows = m.publishedStores.all(now).map(s => {
+      const out = {
+        ...s,
+        ...(ratings.get(s.id) ?? {rating: null, ratingCount: 0}),
+      };
+      const logo = storeLogoUrl(s);
+      if (logo != null) out.logo_url = logo;
+      return out;
+    });
     res.json({ok: true, stores: rows});
   });
 
@@ -1092,6 +1270,7 @@ function buildMarketRouter() {
         region: store.region,
         phone: store.phone,
         whatsapp: store.whatsapp,
+        ...(storeLogoUrl(store) != null ? {logo_url: storeLogoUrl(store)} : {}),
         rating: (() => {
           const r = m.ratingStatsStore.get(store.id);
           return r != null && r.n > 0 ? Math.round(r.avg_stars * 10) / 10 : null;
@@ -1130,25 +1309,34 @@ function buildMarketRouter() {
     if (!store) return res.status(404).json({ok: false, error: 'STORE_NOT_FOUND'});
     const q = String(req.query.q || '').trim();
     const page = Math.max(1, Math.min(1000, Number(req.query.page) || 1));
-    const per = Math.min(100, Math.max(10, Number(req.query.per) || 50));
+    // v4.5: الحد الأدنى 1 (كان 10) — يسمح للتطبيق بتفكيك الطلب
+    // لصفحات صغيرة جداً عند تعثر الشبكة (سلم 12→6→3→1).
+    const per = Math.min(100, Math.max(1, Number(req.query.per) || 50));
+    const offers = req.query.offers === '1' || req.query.offers === 'true';
     const like = q.replace(/[\\%_]/g, c => '\\' + c) + '%';
-    const rows = q
-      ? m.storeProductsSearch.all(store.id, like, per, (page - 1) * per)
-      : m.storeProductsPage.all(store.id, per, (page - 1) * per);
-    res.json({ok: true, products: attachImages(rows), page});
+    let rows;
+    if (offers) {
+      rows = m.storeProductsOffers.all(store.id, per, (page - 1) * per);
+    } else if (q) {
+      rows = m.storeProductsSearch.all(store.id, like, per, (page - 1) * per);
+    } else {
+      rows = m.storeProductsPage.all(store.id, per, (page - 1) * per);
+    }
+    // v4.5: JSON مُدمج — الحقول الفارغة تُحذف (نصف حجم الرد تقريباً)
+    res.json({ok: true, products: rows.map(r => productJson(r)), page});
   });
 
   router.get('/products', (req, res) => {
     const q = String(req.query.q || '').trim();
     const category = String(req.query.category || '').trim();
     const page = Math.max(1, Math.min(1000, Number(req.query.page) || 1));
-    const per = Math.min(100, Math.max(10, Number(req.query.per) || 50));
+    const per = Math.min(100, Math.max(1, Number(req.query.per) || 50));
     // v4.1: بحث عابر للمتاجر + فلتر تصنيف — نفس الاستعلام المُعدّ مسبقاً
     // بتركيبة «معامل فارغ = بلا فلتر» حتى لا تتضاعف العبارات.
     const like = q.replace(/[\\%_]/g, c => '\\' + c) + '%';
     const rows = m.crossProductsFiltered.all(
       Date.now(), q, like, category, category, per, (page - 1) * per);
-    res.json({ok: true, products: attachImages(rows), page});
+    res.json({ok: true, products: rows.map(r => productJson(r, {cross: true})), page});
   });
 
   router.get('/categories', (_req, res) => {
@@ -1369,7 +1557,10 @@ function buildMarketRouter() {
     }
 
     // الأسعار تُقرأ من كتالوج المتجر على الخادم — لا ثقة بأي سعر من العميل.
+    // v4.5: خصم المنتج يُطبَّق هنا — unit_price المسجّل هو السعر المدفوع
+    // فعلاً بعد الخصم، وitems_discount_minor يلخص وفورات المشتري.
     let itemsTotal = 0;
+    let itemsDiscount = 0;
     const lines = [];
     for (const it of items) {
       const product = m.storeProductByIds.get(store.id, Number(it?.productId));
@@ -1385,9 +1576,13 @@ function buildMarketRouter() {
       // الأسعار تبقى من الكتالوج مهما أُرسل. لا يُشترط لإبقاء توافق
       // الإصدارات الأقدم من التطبيق.
       const variant = String(it?.variant || '').trim().slice(0, 120) || null;
-      const lineTotal = Math.round(product.price_minor * quantity);
+      const unit = finalMinor(product);
+      const lineTotal = Math.round(unit * quantity);
+      const lineList = Math.round(product.price_minor * quantity);
+      const lineDiscount = Math.max(0, lineList - lineTotal);
       itemsTotal += lineTotal;
-      lines.push({product, quantity, lineTotal, variant});
+      itemsDiscount += lineDiscount;
+      lines.push({product, unit, quantity, lineTotal, variant});
     }
     const deliveryFee = matched.fee_minor;
     const total = itemsTotal + deliveryFee;
@@ -1403,13 +1598,13 @@ function buildMarketRouter() {
             matched.name,
             String(address || '').trim().slice(0, 200) || null,
             String(note || '').trim().slice(0, 300) || null,
-            deliveryFee, itemsTotal, total, now, now,
+            deliveryFee, itemsTotal, itemsDiscount, total, now, now,
           );
           const orderId = Number(info.lastInsertRowid);
           for (const l of lines) {
             m.insertOrderItem.run(
               orderId, l.product.id, l.product.product_ref, l.product.name,
-              l.product.price_minor, l.quantity, l.lineTotal, l.variant,
+              l.unit, l.quantity, l.lineTotal, l.variant,
             );
           }
           order = m.orderById.get(orderId);
@@ -1612,24 +1807,37 @@ function buildMarketRouter() {
 function buildMarketAdminRouter() {
   const router = express.Router();
 
+  /* ── متجر عمومي للإدارة (بغض النظر عن النشر) ─────────────── */
+  function adminStore(id) {
+    return m.storeById.get(Number(id)) || null;
+  }
+
   router.get('/stores', (req, res) => {
     const rows = db.prepare(
       `SELECT s.*, k.key_plain, k.revoked_at, k.plan_expires_at,
          (SELECT COUNT(*) FROM store_products p
            WHERE p.store_id = s.id AND p.available = 1) AS products_count,
+         (SELECT COUNT(*) FROM store_products p
+           WHERE p.store_id = s.id AND p.available = 1 AND p.discount_pct > 0) AS offers_count,
          (SELECT COUNT(*) FROM market_orders o WHERE o.store_id = s.id) AS orders_count,
          (SELECT COUNT(*) FROM market_orders o
-           WHERE o.store_id = s.id AND o.status = 'new') AS new_orders
+           WHERE o.store_id = s.id AND o.status = 'new') AS new_orders,
+         (SELECT AVG(r.stars) FROM market_ratings r WHERE r.store_id = s.id) AS rating_avg,
+         (SELECT COUNT(*) FROM market_ratings r WHERE r.store_id = s.id) AS rating_count
        FROM stores s JOIN keys k ON k.id = s.key_id
        ORDER BY s.updated_at DESC LIMIT 500`,
     ).all();
     const now = Date.now();
     res.json({
       ok: true,
-      stores: rows.map(r => ({
-        ...r,
-        subscriptionActive: !r.revoked_at && r.plan_expires_at != null && r.plan_expires_at > now,
-      })),
+      stores: rows.map(r => {
+        const logo = storeLogoUrl(r);
+        return {
+          ...r,
+          subscriptionActive: !r.revoked_at && r.plan_expires_at != null && r.plan_expires_at > now,
+          ...(logo != null ? {logo_url: logo} : {}),
+        };
+      }),
     });
   });
 
@@ -1648,13 +1856,102 @@ function buildMarketAdminRouter() {
     res.json({ok: true});
   });
 
+  /* v4.5: تعديل ملف المتجر من الإدارة — نفس قيود register. */
+  router.post('/stores/:id/profile', (req, res) => {
+    const store = adminStore(req.params.id);
+    if (!store) return res.status(404).json({ok: false, error: 'NOT_FOUND'});
+    const b = req.body || {};
+    const name = String(b.name ?? store.name).trim().slice(0, 80);
+    if (name.length < 2) return res.status(400).json({ok: false, error: 'BAD_STORE'});
+    const category = String(b.category ?? store.category ?? '').trim().slice(0, 40) || null;
+    const region = String(b.region ?? store.region ?? '').trim().slice(0, 60) || null;
+    const description = String(b.description ?? store.description ?? '').trim().slice(0, 400) || null;
+    const phone = String(b.phone ?? store.phone ?? '').trim().slice(0, 24) || null;
+    const whatsapp = String(b.whatsapp ?? store.whatsapp ?? '').trim().slice(0, 24) || null;
+    m.updateStore.run(name, description, category, region, phone, whatsapp, Date.now(), store.id);
+    audit('admin_market_store_profile', {adminId: req.adminUser.id, ip: req.ip,
+      details: {storeId: store.id}});
+    res.json({ok: true});
+  });
+
+  /* v4.5: بطاقة المتجر الكاملة — ملف + شعار + مناطق + كتالوج
+   * (بالخصومات والصور) + التقييمات + الطلبات الأخيرة. */
+  router.get('/stores/:id/full', (req, res) => {
+    const store = adminStore(req.params.id);
+    if (!store) return res.status(404).json({ok: false, error: 'NOT_FOUND'});
+    const keyRow = stmt.keyById.get(store.key_id);
+    const now = Date.now();
+    const stats = m.ratingStatsStore.get(store.id);
+    const products = db.prepare(
+      `SELECT * FROM store_products WHERE store_id = ? AND available = 1
+       ORDER BY name COLLATE NOCASE ASC LIMIT 500`,
+    ).all(store.id);
+    res.json({
+      ok: true,
+      store: {
+        ...store,
+        subscriptionActive: !keyRow.revoked_at && keyRow.plan_expires_at != null && keyRow.plan_expires_at > now,
+        ...(storeLogoUrl(store) != null ? {logo_url: storeLogoUrl(store)} : {}),
+      },
+      deliveryRegions: m.listRegions.all(store.id),
+      products: products.map(p => {
+        const j = productJson(p);
+        // للإدارة: نعرض الحقول الفارغة أيضاً (تعديل أدق)
+        return {...p, ...j, images: m.imagesOfProducts.all(p.id).map(imageUrl)};
+      }),
+      rating: stats != null && stats.n > 0 ? Math.round(stats.avg_stars * 10) / 10 : null,
+      ratingCount: stats != null ? stats.n : 0,
+      reviews: m.ratingsOfStore.all(store.id).map(r => ({
+        stars: r.stars, comment: r.comment, createdAt: r.created_at,
+        userName: String(r.user_name || '').trim() || 'مستخدم سيلا',
+      })),
+      orders: db.prepare(
+        `SELECT o.*, u.name AS user_name, u.phone AS user_phone,
+           (SELECT COUNT(*) FROM market_order_items i WHERE i.order_id = o.id) AS items_count
+         FROM market_orders o JOIN market_users u ON u.id = o.user_id
+         WHERE o.store_id = ? ORDER BY o.updated_at DESC LIMIT 50`,
+      ).all(store.id),
+    });
+  });
+
+  /* v4.5: إدارة مستخدمي المتجر — قائمة + تعطيل/تفعيل. */
+  router.get('/users', (req, res) => {
+    const rows = db.prepare(
+      `SELECT u.id, u.id_number, u.name, u.phone, u.disabled, u.created_at, u.last_seen_at,
+         (SELECT COUNT(*) FROM market_orders o WHERE o.user_id = u.id) AS orders_count,
+         (SELECT COUNT(*) FROM market_orders o
+           WHERE o.user_id = u.id AND o.status = 'delivered') AS delivered_count,
+         (SELECT COUNT(*) FROM market_addresses a WHERE a.user_id = u.id) AS addresses_count,
+         (SELECT COUNT(*) FROM market_ratings r WHERE r.user_id = u.id) AS ratings_count
+       FROM market_users u ORDER BY u.last_seen_at DESC LIMIT 500`,
+    ).all();
+    res.json({ok: true, users: rows});
+  });
+
+  router.post('/users/:id/disable', (req, res) => {
+    const id = Number(req.params.id);
+    const user = m.userById.get(id);
+    if (!user) return res.status(404).json({ok: false, error: 'NOT_FOUND'});
+    const disabled = req.body?.disabled ? 1 : 0;
+    db.prepare('UPDATE market_users SET disabled = ? WHERE id = ?').run(disabled, id);
+    if (disabled) {
+      // تعطيل فوري لكل جلساته المفتوحة
+      m.deleteTokensOfUser.run(id);
+    }
+    audit('admin_market_user_disable', {adminId: req.adminUser.id, ip: req.ip,
+      details: {userId: id, disabled}});
+    res.json({ok: true});
+  });
+
   router.get('/orders', (req, res) => {
     const storeId = Number(req.query.storeId) || 0;
     const status = String(req.query.status || '').trim();
-    let sql = `SELECT o.*, s.name AS store_name, u.name AS user_name, u.phone AS user_phone
-               FROM market_orders o
-               JOIN stores s ON s.id = o.store_id
-               JOIN market_users u ON u.id = o.user_id`;
+    let sql = `SELECT o.*, s.name AS store_name, u.name AS user_name, u.phone AS user_phone,
+        (SELECT COUNT(*) FROM market_order_items i WHERE i.order_id = o.id) AS items_count,
+        (SELECT r.stars FROM market_ratings r WHERE r.order_id = o.id) AS rating_stars
+      FROM market_orders o
+      JOIN stores s ON s.id = o.store_id
+      JOIN market_users u ON u.id = o.user_id`;
     const where = [];
     const params = [];
     if (storeId > 0) { where.push('o.store_id = ?'); params.push(storeId); }
@@ -1667,6 +1964,9 @@ function buildMarketAdminRouter() {
   router.get('/stats', (_req, res) => {
     const now = Date.now();
     const count = (sql, ...p) => db.prepare(sql).get(...p).n;
+    const ratingRow = db.prepare(
+      `SELECT COUNT(*) AS n, COALESCE(AVG(stars), 0) AS avg_stars FROM market_ratings`,
+    ).get();
     res.json({
       ok: true,
       stores: count('SELECT COUNT(*) n FROM stores'),
@@ -1675,13 +1975,23 @@ function buildMarketAdminRouter() {
          WHERE s.published = 1 AND k.revoked_at IS NULL
            AND k.plan_expires_at IS NOT NULL AND k.plan_expires_at > ?`, now),
       users: count('SELECT COUNT(*) n FROM market_users'),
+      activeUsers: count(
+        'SELECT COUNT(*) n FROM market_users WHERE disabled = 0 AND last_seen_at > ?',
+        now - 30 * DAY_MS),
+      addresses: count('SELECT COUNT(*) n FROM market_addresses'),
       products: count('SELECT COUNT(*) n FROM store_products WHERE available = 1'),
+      discountedProducts: count(
+        'SELECT COUNT(*) n FROM store_products WHERE available = 1 AND discount_pct > 0'),
+      ratingCount: ratingRow.n,
+      ratingAvg: ratingRow.n > 0 ? Math.round(ratingRow.avg_stars * 10) / 10 : null,
       orders: count('SELECT COUNT(*) n FROM market_orders'),
       newOrders: count(`SELECT COUNT(*) n FROM market_orders WHERE status = 'new'`),
       deliveredOrders: count(`SELECT COUNT(*) n FROM market_orders WHERE status = 'delivered'`),
       gmvMinor: db.prepare(
         `SELECT COALESCE(SUM(total_minor - delivery_fee_minor), 0) v
          FROM market_orders WHERE status IN ('sent','delivered','returned')`).get().v,
+      discountMinor: db.prepare(
+        `SELECT COALESCE(SUM(items_discount_minor), 0) v FROM market_orders`).get().v,
     });
   });
 

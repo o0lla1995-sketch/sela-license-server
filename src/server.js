@@ -106,7 +106,7 @@ app.use((_req, res, next) => {
 });
 
 // ── per-IP rate limiting (sliding window, in-memory) ─────────────
-const RATE_LIMIT = 120; // requests
+const RATE_LIMIT = Number(process.env.RATE_LIMIT) || 120; // requests
 const RATE_WINDOW_MS = 60 * 1000; // per minute
 const hits = new Map();
 

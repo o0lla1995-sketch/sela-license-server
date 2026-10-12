@@ -41,6 +41,7 @@ const env = {
   LICENSE_SIGNING_PRIVATE_KEY:
     '302e020100300506032b6570042204208960d794fa492558c0364af79f0d51c88abc4b20b24cc854f60221116924bd93',
   TZ: 'Asia/Jerusalem',
+  RATE_LIMIT: '9999',
 };
 
 let passed = 0, failed = 0;
@@ -644,6 +645,155 @@ async function main() {
       reReg.status === 200 && reReg.data.token);
     const reOrders = await req('GET', '/api/market/orders', {marketToken: reReg.data.token});
     ok('re-registered account starts clean', reOrders.data.orders.length === 0);
+
+    /* ── 18) v4.5: الخصومات + الشعار + الصفحات الصغيرة + JSON المدمج ── */
+    // مزامنة جديدة: خصم 20% على 101 و10% على 103 (102 بلا خصم)
+    const syncV45 = await req('POST', '/api/v1/store/products/sync', {
+      body: {
+        ...auth,
+        products: [
+          {ref: '101', name: 'أرز أبو كاس 5كغ', category: 'بقالة', priceMinor: 3350, stock: 12, discountPct: 20},
+          {ref: '102', name: 'زيت دوار الشمس 1.5ل', category: 'بقالة', priceMinor: 1800, stock: 9},
+          {ref: '103', name: 'طماطم', category: 'خضار', priceMinor: 400, stock: 30, soldByWeight: true, unitLabel: 'كيلو', discountPct: 10},
+        ],
+      },
+    });
+    ok('v4.5 discount sync', syncV45.status === 200 && syncV45.data.saved === 3);
+
+    // offers=1: المخفضة فقط مرتبة بالخصم الأكبر أولاً
+    const offersList = await req('GET', '/api/market/stores/1/products?offers=1');
+    ok('offers filter returns discounted only, biggest first',
+      offersList.status === 200 && offersList.data.products.length === 2 &&
+      offersList.data.products[0].discount_pct === 20 &&
+      offersList.data.products[0].final_minor === 2680 &&
+      offersList.data.products[1].discount_pct === 10);
+
+    // per=1 (كان الحد الأدنى 10 قبل v4.5)
+    const tinyPage = await req('GET', '/api/market/stores/1/products?per=1&page=2');
+    ok('per=1 tiny pages allowed', tinyPage.status === 200 &&
+      tinyPage.data.products.length === 1 && tinyPage.data.page === 2);
+
+    // JSON مدمج: لا حقول فارغة في الرد الخام
+    const compactRaw = await fetch(BASE + '/api/market/stores/1/products?per=10', {
+      headers: {'Accept-Encoding': 'identity'},
+    }).then(r => r.text());
+    ok('compact json omits null/empty fields',
+      !compactRaw.includes('"category":null') &&
+      !compactRaw.includes('"images":[]') &&
+      !compactRaw.includes('"sold_by_weight":0') &&
+      compactRaw.includes('"discount_pct":20'));
+
+    // طلب بمنتج مخفض: وفر الخصم يُحسب على الخادم ويُسجل على الطلب
+    const buyer = await req('POST', '/api/market/auth/register', {
+      body: {idNumber: '501' + String(Math.floor(100000 + Math.random() * 899999)),
+        name: 'مشتري الخصومات', phone: '0599000001', password: 'buyer-12345'},
+    });
+    ok('discount buyer registered', buyer.status === 200 && buyer.data.token);
+    const riceDisc = offersList.data.products.find(p2 => p2.product_ref === '101');
+    const discOrder = await req('POST', '/api/market/orders', {
+      marketToken: buyer.data.token,
+      body: {
+        storeId: 1,
+        items: [{productId: riceDisc.id, quantity: 2}],
+        regionName: 'المركز',
+        address: 'شارع الخصومات 1',
+      },
+    });
+    ok('discounted order: unit price after 20% off',
+      discOrder.status === 200 &&
+      discOrder.data.order.items[0].unit_price_minor === 2680 &&
+      discOrder.data.order.items[0].line_total_minor === 5360);
+    ok('discounted order: items_discount_minor recorded',
+      discOrder.data.order.items_discount_minor === 1340 &&
+      discOrder.data.order.items_total_minor === 5360);
+
+    // شعار المتجر عبر register (رفع بلا هاش — يُحسب على الخادم)
+    const logoBytes = fakeWebp('L');
+    const regLogo = await req('POST', '/api/v1/store/register', {
+      body: {
+        ...auth,
+        store: {name: 'سوبر ماركت النور ٢', phone: '0591234567'},
+        deliveryRegions: [{name: 'المركز', feeMinor: 1200}, {name: 'المخيم', feeMinor: 1500}],
+        published: true,
+        logo: {data: logoBytes.toString('base64'), ext: 'webp', width: 512, height: 512},
+      },
+    });
+    ok('store logo uploaded via register',
+      regLogo.status === 200 && regLogo.data.store.logoUrl &&
+      regLogo.data.store.logoUrl.includes('/api/market/img/1/'));
+    const storesWithLogo = await req('GET', '/api/market/stores');
+    ok('stores list carries logo_url',
+      storesWithLogo.data.stores.some(s2 => s2.logo_url === regLogo.data.store.logoUrl));
+    const detailLogo = await req('GET', '/api/market/stores/1');
+    ok('store detail carries logo_url',
+      detailLogo.data.store.logo_url === regLogo.data.store.logoUrl);
+    const logoFetch = await fetch(BASE + regLogo.data.store.logoUrl);
+    ok('logo image served', logoFetch.status === 200 &&
+      logoFetch.headers.get('content-type') === 'image/webp');
+
+    // مزامنة صور فارغة: الكنس لا يلمس شعار المتجر
+    const imgSweep = await req('POST', '/api/v1/store/images/sync', {
+      body: {...auth, images: [{ref: '101', items: []}]},
+    });
+    ok('image sweep ran', imgSweep.status === 200);
+    const logoAfterSweep = await fetch(BASE + regLogo.data.store.logoUrl);
+    ok('logo protected from orphan cleanup', logoAfterSweep.status === 200);
+
+    // إزالة الشعار: logo:null
+    const regNoLogo = await req('POST', '/api/v1/store/register', {
+      body: {
+        ...auth,
+        store: {name: 'سوبر ماركت النور ٢', phone: '0591234567'},
+        deliveryRegions: [{name: 'المركز', feeMinor: 1200}, {name: 'المخيم', feeMinor: 1500}],
+        published: true,
+        logo: null,
+      },
+    });
+    ok('logo removed with logo:null', regNoLogo.status === 200 &&
+      regNoLogo.data.store.logoUrl == null);
+    const storesNoLogo = await req('GET', '/api/market/stores');
+    ok('stores list drops logo_url when absent',
+      storesNoLogo.data.stores.every(s2 => s2.logo_url == null));
+
+    // رفع صورة منتج مضمّناً (بلا هاش على العميل) عبر images/sync
+    const inlineImg = fakeWebp('Q');
+    const inlineSync = await req('POST', '/api/v1/store/images/sync', {
+      body: {
+        ...auth,
+        images: [
+          {ref: '102', items: [{data: inlineImg.toString('base64'), ext: 'webp', width: 640, height: 480, slot: 0}]},
+        ],
+      },
+    });
+    ok('inline image upload (server-side hash)',
+      inlineSync.status === 200 && inlineSync.data.inline === 1);
+    const oil = await req('GET', '/api/market/stores/1/products?q=' + encodeURIComponent('زيت'));
+    ok('inline-uploaded product image visible',
+      oil.data.products[0].images != null && oil.data.products[0].images.length === 1);
+
+    // إدارة: مستخدمو المتجر + بطاقة المتجر الكاملة + إحصاءات موسعة
+    const adminUsers = await req('GET', '/api/admin/market/users', {token: 'root-master-token'});
+    ok('admin market users list',
+      adminUsers.status === 200 && adminUsers.data.users.length > 0 &&
+      adminUsers.data.users.every(u => u.orders_count != null));
+    const fullStore = await req('GET', '/api/admin/market/stores/1/full', {token: 'root-master-token'});
+    ok('admin store full view',
+      fullStore.status === 200 && fullStore.data.products.length === 3 &&
+      fullStore.data.deliveryRegions != null && fullStore.data.orders != null);
+    const adminStats = await req('GET', '/api/admin/market/stats', {token: 'root-master-token'});
+    ok('admin stats extended (discounts + ratings)',
+      adminStats.status === 200 && adminStats.data.discountedProducts === 2 &&
+      adminStats.data.ratingCount != null);
+    const adminProfile = await req('POST', '/api/admin/market/stores/1/profile',
+      {token: 'root-master-token', body: {name: 'سوبر ماركت النور ٢', category: 'بقالة'}});
+    ok('admin store profile edit', adminProfile.status === 200);
+    const buyerId = adminUsers.data.users.find(u => u.id_number === buyer.data.user.idNumber)?.id;
+    const disableUser = await req('POST', `/api/admin/market/users/${buyerId}/disable`,
+      {token: 'root-master-token', body: {disabled: true}});
+    ok('admin user disable', disableUser.status === 200);
+    const disabledOrder = await req('GET', '/api/market/orders', {marketToken: buyer.data.token});
+    ok('disabled user session revoked', disabledOrder.status === 401);
+
 
   } finally {
     server.kill('SIGTERM');
