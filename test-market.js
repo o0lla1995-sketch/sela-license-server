@@ -168,6 +168,87 @@ async function main() {
     prods = await req('GET', '/api/market/stores/1/products');
     ok('product returns when re-synced', prods.data.products.length === 3);
 
+    /* ── 3b) صور المنتجات (v4.2) ────────────────────────────── */
+    // بناء WebP اصطيناعي صالح بصرياً للبصمة السحرية (RIFF....WEBP)
+    const crypto = require('crypto');
+    function fakeWebp(seed) {
+      const buf = Buffer.alloc(120);
+      buf.write('RIFF', 0, 'ascii');
+      buf.writeUInt32LE(buf.length - 8, 4);
+      buf.write('WEBPVP8 ', 8, 'ascii');
+      crypto.createHash('sha256').update(String(seed)).digest(); // استهلاك فقط
+      for (let i = 16; i < buf.length; i++) {
+        buf[i] = (i * 7 + seed.charCodeAt(0)) % 251;
+      }
+      return buf;
+    }
+    const img1 = fakeWebp('A');
+    const img2 = fakeWebp('B');
+    const hash1 = crypto.createHash('sha256').update(img1).digest('hex');
+    const hash2 = crypto.createHash('sha256').update(img2).digest('hex');
+    // هاش معلن لا يطابق المحتوى → رفض
+    const badImgSync = await req('POST', '/api/v1/store/images/sync', {
+      body: {
+        ...auth,
+        images: [{ref: '101', items: [{hash: hash1, slot: 0}]}],
+        uploads: [{hash: hash1, ext: 'webp', data: fakeWebp('Z').toString('base64')}],
+      },
+    });
+    ok('image upload with mismatched hash rejected', badImgSync.status === 400 &&
+      badImgSync.data.error === 'BAD_IMAGE_DATA');
+    const imgSync = await req('POST', '/api/v1/store/images/sync', {
+      body: {
+        ...auth,
+        images: [
+          {ref: '101', items: [{hash: hash1, slot: 0}, {hash: hash2, slot: 1}]},
+          {ref: '103', items: [{hash: hash2, slot: 0}]},
+        ],
+        uploads: [
+          {hash: hash1, ext: 'webp', data: img1.toString('base64'), width: 800, height: 600},
+          {hash: hash2, ext: 'webp', data: img2.toString('base64'), width: 640, height: 480},
+        ],
+      },
+    });
+    ok('images sync stored + linked', imgSync.status === 200 &&
+      imgSync.data.stored === 2 && imgSync.data.linked === 2);
+    // إعادة الإرسال نفسه: dedupe كامل (0 رفع جديد) وidempotent
+    const imgSync2 = await req('POST', '/api/v1/store/images/sync', {
+      body: {
+        ...auth,
+        images: [
+          {ref: '101', items: [{hash: hash1, slot: 0}, {hash: hash2, slot: 1}]},
+          {ref: '103', items: [{hash: hash2, slot: 0}]},
+        ],
+        uploads: [
+          {hash: hash1, ext: 'webp', data: img1.toString('base64')},
+        ],
+      },
+    });
+    ok('images re-sync dedupes', imgSync2.status === 200 && imgSync2.data.stored === 0);
+    // صورة 101 استُبدلت بصورة واحدة → القديمة (hash2 من 103 تبقى) تُكنس من 101
+    const imgSync3 = await req('POST', '/api/v1/store/images/sync', {
+      body: {...auth, images: [{ref: '101', items: [{hash: hash1, slot: 0}]}]},
+    });
+    ok('images replace per product', imgSync3.status === 200);
+    prods = await req('GET', '/api/market/stores/1/products');
+    const rice = prods.data.products.find(p => p.product_ref === '101');
+    const tomato = prods.data.products.find(p => p.product_ref === '103');
+    ok('products carry image URLs', Array.isArray(rice.images) && rice.images.length === 1 &&
+      rice.images[0].includes(`/api/market/img/1/${hash1}.webp`) &&
+      tomato.images.length === 1 && tomato.images[0].includes(`${hash2}.webp`));
+    const crossImg = await req('GET', '/api/market/products?q=' + encodeURIComponent('أرز'));
+    ok('cross products carry images too', crossImg.data.products[0].images.length === 1);
+    // جلب الصورة فعلياً: 200 + نوع المحتوى + كاش دائم
+    const imgFetch = await fetch(BASE + rice.images[0]);
+    ok('image served with immutable cache',
+      imgFetch.status === 200 &&
+      imgFetch.headers.get('content-type') === 'image/webp' &&
+      (imgFetch.headers.get('cache-control') || '').includes('immutable'));
+    const imgBuf = Buffer.from(await imgFetch.arrayBuffer());
+    ok('image bytes round-trip', imgBuf.equals(img1));
+    const img404 = await fetch(BASE + `/api/market/img/1/${'0'.repeat(64)}.webp`);
+    ok('unknown image 404', img404.status === 404);
+
     /* ── 4) الواجهات العامة ────────────────────────────────── */
     const stores = await req('GET', '/api/market/stores');
     ok('market stores list', stores.data.ok && stores.data.stores.length === 1);
@@ -193,28 +274,64 @@ async function main() {
       '&category=' + encodeURIComponent('خضار'));
     ok('cross search + category combined (no match)', crossQCat.data.products.length === 0);
 
-    /* ── 5) مستخدم المتجر ──────────────────────────────────── */
+    /* ── 5) مستخدم المتجر (v4.2: كلمة مرور إلزامية) ────────── */
+    const weakPw = await req('POST', '/api/market/auth/register',
+      {body: {idNumber: '401234567', name: 'أحمد الخطيب', phone: '0598765432', password: '123'}});
+    ok('weak password rejected', weakPw.status === 400 && weakPw.data.error === 'BAD_PASSWORD');
+    const digitsPw = await req('POST', '/api/market/auth/register',
+      {body: {idNumber: '401234567', name: 'أحمد الخطيب', phone: '0598765432', password: '12345678'}});
+    ok('digits-only password rejected', digitsPw.status === 400);
     const ureg = await req('POST', '/api/market/auth/register',
-      {body: {idNumber: '401234567', name: 'أحمد الخطيب', phone: '0598765432'}});
-    ok('user register', ureg.status === 200 && ureg.data.token);
+      {body: {idNumber: '401234567', name: 'أحمد الخطيب', phone: '0598765432', password: 'sela-2024-pass'}});
+    ok('user register with password', ureg.status === 200 && ureg.data.token);
     const mtok = ureg.data.token;
     const ureg2 = await req('POST', '/api/market/auth/register',
-      {body: {idNumber: '401234567', name: 'آخر', phone: '0599999999'}});
+      {body: {idNumber: '401234567', name: 'آخر', phone: '0599999999', password: 'other-1234-pass'}});
     ok('duplicate id rejected', ureg2.status === 409);
-    const ulog = await req('POST', '/api/market/auth/login',
+    const ulogBad = await req('POST', '/api/market/auth/login',
+      {body: {idNumber: '401234567', password: 'wrong-pass-9'}});
+    ok('wrong password rejected', ulogBad.status === 403 && ulogBad.data.error === 'BAD_CREDENTIALS');
+    const ulogPhone = await req('POST', '/api/market/auth/login',
       {body: {idNumber: '401234567', phone: '0598765432'}});
-    ok('user login', ulog.status === 200 && ulog.data.token);
+    ok('phone login rejected for protected account', ulogPhone.status === 400 &&
+      ulogPhone.data.error === 'PASSWORD_REQUIRED');
+    const ulog = await req('POST', '/api/market/auth/login',
+      {body: {idNumber: '401234567', password: 'sela-2024-pass'}});
+    ok('user login with password', ulog.status === 200 && ulog.data.token);
+    // تغيير كلمة المرور: الحالية الخاطئة تُرفض ثم الصحيحة تنجح
+    const pwWrongCur = await req('POST', '/api/market/auth/set-password',
+      {marketToken: mtok, body: {password: 'new-pass-5678', currentPassword: 'nope-1234'}});
+    ok('set-password with wrong current rejected', pwWrongCur.status === 403);
+    const pwSet = await req('POST', '/api/market/auth/set-password',
+      {marketToken: mtok, body: {password: 'new-pass-5678', currentPassword: 'sela-2024-pass'}});
+    ok('set-password change ok', pwSet.status === 200);
+    const ulog2 = await req('POST', '/api/market/auth/login',
+      {body: {idNumber: '401234567', password: 'new-pass-5678'}});
+    ok('login with changed password', ulog2.status === 200);
+    // استعادة: جوال خاطئ يُرفض، الصحيح يعيّن كلمة جديدة ويبطل الجلسات
+    const resetBad = await req('POST', '/api/market/auth/reset',
+      {body: {idNumber: '401234567', phone: '0599000000', newPassword: 'reset-pass-90'}});
+    ok('reset with wrong phone rejected', resetBad.status === 403);
+    const reset = await req('POST', '/api/market/auth/reset',
+      {body: {idNumber: '401234567', phone: '0598765432', newPassword: 'reset-pass-90'}});
+    ok('reset ok and returns fresh token', reset.status === 200 && reset.data.token);
+    const oldTokDead = await req('GET', '/api/market/orders', {marketToken: mtok});
+    ok('old sessions revoked after reset', oldTokDead.status === 401);
+    const mtok2 = reset.data.token;
+    const ulog3 = await req('POST', '/api/market/auth/login',
+      {body: {idNumber: '401234567', password: 'reset-pass-90'}});
+    ok('login after reset', ulog3.status === 200);
 
     /* ── 6) الطلب ──────────────────────────────────────────── */
     const badRegion = await req('POST', '/api/market/orders', {
-      marketToken: mtok,
+      marketToken: mtok2,
       body: {storeId: 1, items: [{productId: 1, quantity: 2}], regionName: 'بلاد العجائب'},
     });
     ok('bad region rejected with region list', badRegion.status === 400 &&
       Array.isArray(badRegion.data.regions));
 
     const order = await req('POST', '/api/market/orders', {
-      marketToken: mtok,
+      marketToken: mtok2,
       body: {
         storeId: 1,
         items: [
@@ -261,22 +378,22 @@ async function main() {
       {body: {...auth, orderNumber, action: 'deliver'}});
     ok('deliver', del.status === 200 && del.data.order.status === 'delivered');
 
-    const myOrders = await req('GET', '/api/market/orders', {marketToken: mtok});
+    const myOrders = await req('GET', '/api/market/orders', {marketToken: mtok2});
     ok('user sees own order statuses', myOrders.data.orders.length === 1 &&
       myOrders.data.orders[0].status === 'delivered' &&
       myOrders.data.orders[0].store.name === 'سوبر ماركت النور ٢');
 
     /* ── 9) إلغاء المستخدم ─────────────────────────────────── */
     const order2 = await req('POST', '/api/market/orders', {
-      marketToken: mtok,
+      marketToken: mtok2,
       body: {storeId: 1, items: [{productId: 2, quantity: 1}], regionName: 'المركز'},
     });
     const on2 = order2.data.order.order_number;
     const cancel = await req('POST', `/api/market/orders/${order2.data.order.id}/cancel`,
-      {marketToken: mtok});
+      {marketToken: mtok2});
     ok('user cancels before send', cancel.status === 200 && cancel.data.order.status === 'cancelled');
     const cancelAgain = await req('POST', '/api/market/orders', {
-      marketToken: mtok,
+      marketToken: mtok2,
       body: {storeId: 1, items: [{productId: 2, quantity: 1}], regionName: 'المركز'},
     });
     const on3 = cancelAgain.data.order.order_number;
@@ -285,7 +402,7 @@ async function main() {
     await req('POST', '/api/v1/store/orders/action',
       {body: {...auth, orderNumber: on3, action: 'send', invoiceRef: 'INV-O-20261012-0002'}});
     const lateCancel = await req('POST', `/api/market/orders/${cancelAgain.data.order.id}/cancel`,
-      {marketToken: mtok});
+      {marketToken: mtok2});
     ok('user cancel after send rejected', lateCancel.status === 409);
 
     /* ── 10) الإرجاع بعد التسليم ───────────────────────────── */
@@ -365,15 +482,15 @@ async function main() {
     /* ── 14) حذف الحساب (سياسة جوجل بلاي) ─────────────────── */
     const delNoAuth = await req('POST', '/api/market/auth/delete', {});
     ok('delete without token rejected', delNoAuth.status === 401);
-    const delAcc = await req('POST', '/api/market/auth/delete', {marketToken: mtok});
+    const delAcc = await req('POST', '/api/market/auth/delete', {marketToken: mtok2});
     ok('account deleted', delAcc.status === 200 && delAcc.data.ok);
-    const deadSession = await req('GET', '/api/market/orders', {marketToken: mtok});
+    const deadSession = await req('GET', '/api/market/orders', {marketToken: mtok2});
     ok('old token dead after deletion', deadSession.status === 401);
     const deadLogin = await req('POST', '/api/market/auth/login',
-      {body: {idNumber: '401234567', phone: '0598765432'}});
+      {body: {idNumber: '401234567', password: 'reset-pass-90'}});
     ok('deleted account cannot log in', deadLogin.status === 403);
     const reReg = await req('POST', '/api/market/auth/register',
-      {body: {idNumber: '401234567', name: 'عودة أحمد', phone: '0598765432'}});
+      {body: {idNumber: '401234567', name: 'عودة أحمد', phone: '0598765432', password: 'fresh-321-pass'}});
     ok('same id number freed for re-registration',
       reReg.status === 200 && reReg.data.token);
     const reOrders = await req('GET', '/api/market/orders', {marketToken: reReg.data.token});

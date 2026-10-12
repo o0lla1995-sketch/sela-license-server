@@ -93,7 +93,8 @@ const jsonBig = express.json({limit: '14mb'});
 const jsonSmall = express.json({limit: '64kb'});
 app.use('/api/admin/media', jsonBig); // base64 screenshots land here
 // v4: مزامنة كتالوج المتجر — كتالوج كامل بضغطة واحدة (حد سخي 8mb)
-app.use('/api/v1/store', express.json({limit: '8mb'}));
+// v4.2: دفعات صور المنتجات المضغوطة (WebP) — 32mb (بحد 150 صورة/نداء)
+app.use('/api/v1/store', express.json({limit: '32mb'}));
 app.use('/api', jsonSmall);
 
 // Security headers for the panel.

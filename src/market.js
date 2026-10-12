@@ -31,6 +31,8 @@
 
 const express = require('express');
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 const {db, stmt, getSetting, audit} = require('./db');
 const {verifyLicensePair} = require('./crypto');
 
@@ -92,10 +94,33 @@ CREATE TABLE IF NOT EXISTS market_users (
   id_number     TEXT NOT NULL UNIQUE,
   name          TEXT NOT NULL,
   phone         TEXT NOT NULL,
+  password_hash TEXT,
+  pw_updated_at INTEGER,
   disabled      INTEGER NOT NULL DEFAULT 0,
   created_at    INTEGER NOT NULL,
   last_seen_at  INTEGER
 );
+
+CREATE TABLE IF NOT EXISTS store_images (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  store_id      INTEGER NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+  hash          TEXT NOT NULL,
+  ext           TEXT NOT NULL DEFAULT 'webp',
+  bytes         INTEGER NOT NULL,
+  width         INTEGER,
+  height        INTEGER,
+  created_at    INTEGER NOT NULL,
+  UNIQUE(store_id, hash)
+);
+CREATE INDEX IF NOT EXISTS idx_store_images_store ON store_images(store_id);
+
+CREATE TABLE IF NOT EXISTS store_product_images (
+  product_id    INTEGER NOT NULL REFERENCES store_products(id) ON DELETE CASCADE,
+  image_id      INTEGER NOT NULL REFERENCES store_images(id) ON DELETE CASCADE,
+  sort_order    INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (product_id, image_id)
+);
+CREATE INDEX IF NOT EXISTS idx_store_product_images_p ON store_product_images(product_id, sort_order);
 
 CREATE TABLE IF NOT EXISTS market_tokens (
   token_hash    TEXT PRIMARY KEY,
@@ -146,6 +171,24 @@ CREATE TABLE IF NOT EXISTS market_order_items (
 CREATE INDEX IF NOT EXISTS idx_order_items_order ON market_order_items(order_id);
 `);
 
+/* ── ترحيل v4.2: أعمدة كلمة المرور على نشر قائم (CREATE IF NOT
+ *    EXISTS لا يضيف أعمدة لجدول موجود). PRAGMA table_info مرة واحدة. */
+(function migrateUsersPassword() {
+  const cols = db.prepare('PRAGMA table_info(market_users)').all().map(c => c.name);
+  if (!cols.includes('password_hash')) {
+    db.exec('ALTER TABLE market_users ADD COLUMN password_hash TEXT');
+  }
+  if (!cols.includes('pw_updated_at')) {
+    db.exec('ALTER TABLE market_users ADD COLUMN pw_updated_at INTEGER');
+  }
+})();
+
+/* ── تخزين صور المنتجات: DATA_DIR/market-images/<store_id>/<hash>.<ext>
+ *    مسارات المحتوى المُوجّهة بالهاش تسمح بكاش دائم (immutable). */
+const IMAGES_DIR = path.join(
+  process.env.DATA_DIR || '/data', 'market-images');
+fs.mkdirSync(IMAGES_DIR, {recursive: true});
+
 /* ── عبارات معدّة مسبقاً (نفس انضباط db.js: تنشأ مرة واحدة) ───── */
 const m = {
   storeByKey: db.prepare('SELECT * FROM stores WHERE key_id = ?'),
@@ -182,10 +225,13 @@ const m = {
     'SELECT COUNT(*) AS n FROM store_products WHERE store_id = ? AND available = 1'),
 
   insertUser: db.prepare(
-    'INSERT INTO market_users (id_number, name, phone, created_at, last_seen_at) VALUES (?, ?, ?, ?, ?)'),
+    'INSERT INTO market_users (id_number, name, phone, password_hash, pw_updated_at, created_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?)'),
   userByIdNumber: db.prepare('SELECT * FROM market_users WHERE id_number = ?'),
   userById: db.prepare('SELECT * FROM market_users WHERE id = ?'),
   touchUser: db.prepare('UPDATE market_users SET last_seen_at = ? WHERE id = ?'),
+  // v4.2: كلمات المرور
+  setUserPassword: db.prepare(
+    'UPDATE market_users SET password_hash = ?, pw_updated_at = ? WHERE id = ?'),
   insertToken: db.prepare(
     'INSERT INTO market_tokens (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)'),
   tokenByHash: db.prepare('SELECT * FROM market_tokens WHERE token_hash = ?'),
@@ -221,6 +267,28 @@ const m = {
        (order_id, product_id, product_ref, product_name, unit_price_minor, quantity, line_total_minor)
      VALUES (?, ?, ?, ?, ?, ?, ?)`),
   orderItems: db.prepare('SELECT * FROM market_order_items WHERE order_id = ?'),
+
+  // v4.2: صور المنتجات (content-addressed داخل نطاق المتجر)
+  imageByStoreHash: db.prepare(
+    'SELECT * FROM store_images WHERE store_id = ? AND hash = ?'),
+  insertImage: db.prepare(
+    `INSERT OR IGNORE INTO store_images (store_id, hash, ext, bytes, width, height, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`),
+  imageById: db.prepare('SELECT * FROM store_images WHERE id = ?'),
+  clearProductImages: db.prepare('DELETE FROM store_product_images WHERE product_id = ?'),
+  linkProductImage: db.prepare(
+    `INSERT OR REPLACE INTO store_product_images (product_id, image_id, sort_order)
+     VALUES (?, ?, ?)`),
+  imagesOfProducts: db.prepare(
+    `SELECT pi.product_id, i.store_id, i.hash, i.ext
+     FROM store_product_images pi JOIN store_images i ON i.id = pi.image_id
+     WHERE pi.product_id = ? ORDER BY pi.sort_order ASC, i.id ASC`),
+  productByRef: db.prepare(
+    'SELECT id FROM store_products WHERE store_id = ? AND product_ref = ?'),
+  orphanImages: db.prepare(
+    `SELECT id, store_id, hash, ext FROM store_images
+     WHERE store_id = ? AND id NOT IN (SELECT image_id FROM store_product_images)`),
+  deleteImageRow: db.prepare('DELETE FROM store_images WHERE id = ?'),
 
   publishedStores: db.prepare(
     `SELECT s.id, s.store_number, s.name, s.description, s.category, s.region, s.phone, s.whatsapp
@@ -277,6 +345,106 @@ const m = {
 
 function sha256(text) {
   return crypto.createHash('sha256').update(String(text)).digest('hex');
+}
+
+/* ── v4.2: كلمات المرور (scrypt — مكتبة Node المدمجة، بلا اعتماديات) ──
+ * سياسة: 8–72 محرفاً، حرف واحد على الأقل + رقم واحد على الأقل. */
+const SCRYPT_OPTS = {N: 16384, r: 8, p: 1};
+
+function passwordProblem(password) {
+  if (typeof password !== 'string') return 'BAD_PASSWORD';
+  if (password.length < 8 || password.length > 72) return 'BAD_PASSWORD';
+  if (!/[0-9]/.test(password) || !/[^\d]/.test(password)) return 'BAD_PASSWORD';
+  return null;
+}
+
+function hashPassword(password) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const hash = crypto.scryptSync(password, salt, 32, SCRYPT_OPTS).toString('hex');
+  return `scrypt$${salt}$${hash}`;
+}
+
+function verifyPassword(password, stored) {
+  if (typeof stored !== 'string' || !stored.startsWith('scrypt$')) return false;
+  const parts = stored.split('$');
+  if (parts.length !== 3) return false;
+  const check = crypto.scryptSync(String(password), parts[1], 32, SCRYPT_OPTS);
+  const expected = Buffer.from(parts[2], 'hex');
+  return expected.length === check.length &&
+    crypto.timingSafeEqual(expected, check);
+}
+
+/* قفل محاولات الدخول الفاشلة: 10 محاولات / 15 دقيقة لكل حساب.
+ * في الذاكرة (نسخة واحدة) — عداد وقفل بلا ثبات مقبولان تماماً هنا. */
+const LOGIN_FAIL_LIMIT = 10;
+const LOGIN_LOCK_MS = 15 * 60 * 1000;
+const loginFails = new Map(); // id_number → {count, lockedUntil}
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, rec] of loginFails) {
+    if (rec.lockedUntil < now && now - (rec.lastAt || 0) > LOGIN_LOCK_MS) {
+      loginFails.delete(id);
+    }
+  }
+}, 60 * 1000).unref();
+
+function loginLocked(idNumber) {
+  const rec = loginFails.get(idNumber);
+  return rec != null && rec.lockedUntil > Date.now();
+}
+
+function recordLoginFail(idNumber) {
+  const rec = loginFails.get(idNumber) || {count: 0, lockedUntil: 0, lastAt: 0};
+  rec.count += 1;
+  rec.lastAt = Date.now();
+  if (rec.count >= LOGIN_FAIL_LIMIT) {
+    rec.lockedUntil = Date.now() + LOGIN_LOCK_MS;
+    rec.count = 0;
+  }
+  loginFails.set(idNumber, rec);
+}
+
+function clearLoginFails(idNumber) {
+  loginFails.delete(idNumber);
+}
+
+/* ── v4.2: مساعدات الصور ────────────────────────────────────── */
+
+/** رابط عام لصورة (نسبي — التطبيق يضيف عنوان الخادم). */
+function imageUrl(row) {
+  return `/api/market/img/${row.store_id}/${row.hash}.${row.ext}`;
+}
+
+/** يلحق images: [urls] بصفوف منتجات (استدعاء واحد لكل منتج —
+ *  الصفحات ≤100 منتج، وكل استدعاء عبارة معدّة مسبقاً). */
+function attachImages(rows) {
+  for (const row of rows) {
+    row.images = m.imagesOfProducts.all(row.id).map(imageUrl);
+  }
+  return rows;
+}
+
+/** فحص البصمة السحرية للصورة المستقبلة + حد الحجم. */
+const IMAGE_MAX_BYTES = 1024 * 1024; // 1MB لكل صورة مضغوطة (WebP ~30–120KB)
+function decodeUpload(up) {
+  if (up == null || typeof up !== 'object') return null;
+  const hash = String(up.hash || '').toLowerCase();
+  const ext = String(up.ext || 'webp').toLowerCase();
+  const data = String(up.data || '');
+  if (!/^[a-f0-9]{16,64}$/.test(hash)) return null;
+  if (!['webp', 'jpg'].includes(ext)) return null;
+  const buf = Buffer.from(data, 'base64');
+  if (buf.length < 64 || buf.length > IMAGE_MAX_BYTES) return null;
+  const isWebp = buf.length > 12 && buf[0] === 0x52 && buf[1] === 0x49 &&
+    buf[2] === 0x46 && buf[3] === 0x46 && buf[8] === 0x57 && buf[9] === 0x45;
+  const isJpg = buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff;
+  if (ext === 'webp' ? !isWebp : !isJpg) return null;
+  // الهاش المعروف يجب أن يطابق المحتوى فعلاً (integrity)
+  if (crypto.createHash('sha256').update(buf).digest('hex').slice(0, hash.length) !== hash) {
+    return null;
+  }
+  return {hash, ext, buf, width: Math.round(Number(up.width)) || null,
+    height: Math.round(Number(up.height)) || null};
 }
 
 /** ORD-YYYYMMDD-XXXXXX — اليوم + 6 محارف عشوائية (تصادم شبه مستحيل،
@@ -479,6 +647,93 @@ function buildStoreRouter() {
     });
   });
 
+  /* ── images/sync: صور المنتجات (v4.2) ─────────────────────────
+   * منفصلة عن مزامنة الكتالوج كي تبقى الأخيرة خفيفة سريعة.
+   * POS يضغط الصور إلى WebP (~800px، ~40–120KB) قبل الإرسال،
+   * والخادم يخزنها موجّهةً بالمحتوى (sha256) فيملك:
+   *   • إرسال الهاش فقط للصور غير المتغيرة (بلا رفع متكرر)؛
+   *   • كاش HTTP دائم لأن الرابط يحمل الهاش (immutable).
+   * الطلب: images: [{ref, items: [{hash, slot}]}], uploads: [{hash, ext, data, width, height}]
+   * كل منتج يستبدل روابطه بالكامل بالقائمة المرسلة (idempotent). */
+  router.post('/images/sync', (req, res) => {
+    const auth = authenticate(req.body, res);
+    if (!auth) return;
+    if (!requireStore(auth, res)) return;
+    const {images, uploads} = req.body || {};
+    if (!Array.isArray(images) || images.length > 2000 ||
+        (uploads != null && !Array.isArray(uploads)) || (uploads || []).length > 150) {
+      return res.status(400).json({ok: false, error: 'BAD_IMAGES'});
+    }
+    const now = auth.now;
+    const storeDir = path.join(IMAGES_DIR, String(auth.store.id));
+    fs.mkdirSync(storeDir, {recursive: true});
+
+    // 1) تخزين الرفعات الجديدة (تجاوز للصور الموجودة مسبقاً بنفس الهاش)
+    let stored = 0;
+    for (const up of uploads || []) {
+      const decoded = decodeUpload(up);
+      if (decoded == null) {
+        return res.status(400).json({ok: false, error: 'BAD_IMAGE_DATA'});
+      }
+      const existing = m.imageByStoreHash.get(auth.store.id, decoded.hash);
+      if (existing != null) {
+        continue; // dedupe — لا إعادة تخزين
+      }
+      const file = path.join(storeDir, `${decoded.hash}.${decoded.ext}`);
+      try {
+        fs.writeFileSync(file, decoded.buf);
+      } catch (err) {
+        return res.status(500).json({ok: false, error: 'IMAGE_STORE_FAILED'});
+      }
+      m.insertImage.run(
+        auth.store.id, decoded.hash, decoded.ext, decoded.buf.length,
+        decoded.width, decoded.height, now);
+      stored += 1;
+    }
+
+    // 2) ربط روابط الصور بكل منتج (استبدال كامل — idempotent)
+    let linked = 0;
+    let missing = 0;
+    db.transaction(() => {
+      for (const entry of images) {
+        if (entry == null || typeof entry.ref !== 'string') continue;
+        const product = m.productByRef.get(auth.store.id, String(entry.ref).slice(0, 40));
+        if (product == null) {
+          missing += 1;
+          continue;
+        }
+        const items = (Array.isArray(entry.items) ? entry.items : [])
+          .filter(it => it != null && /^[a-f0-9]{16,64}$/i.test(String(it.hash || '')))
+          .slice(0, 8);
+        m.clearProductImages.run(product.id);
+        items.forEach((it, index) => {
+          const img = m.imageByStoreHash.get(auth.store.id, String(it.hash).toLowerCase());
+          if (img != null) {
+            m.linkProductImage.run(product.id, img.id, Math.max(0, Math.round(Number(it.slot) || index)));
+          }
+        });
+        linked += 1;
+      }
+    })();
+
+    // 3) كنس الصور اليتيمة (بلا أي منتج يشير إليها) — صفوف وملفات
+    let cleaned = 0;
+    try {
+      const orphans = m.orphanImages.all(auth.store.id);
+      db.transaction(() => {
+        for (const orphan of orphans) {
+          m.deleteImageRow.run(orphan.id);
+          try {
+            fs.unlinkSync(path.join(storeDir, `${orphan.hash}.${orphan.ext}`));
+          } catch (_) { /* الملف قد يكون محذوفاً أصلاً */ }
+          cleaned += 1;
+        }
+      })();
+    } catch (_) { /* الكنس أفضل جهد — لا يفشل النداء بسببه */ }
+
+    res.json({ok: true, stored, linked, missing, cleaned, serverTime: now});
+  });
+
   /* ── orders/poll: طلبات جديدة/محدثة منذ مؤشر ─────────────── */
   router.post('/orders/poll', (req, res) => {
     const auth = authenticate(req.body, res);
@@ -659,7 +914,7 @@ function buildMarketRouter() {
     const rows = q
       ? m.storeProductsSearch.all(store.id, like, per, (page - 1) * per)
       : m.storeProductsPage.all(store.id, per, (page - 1) * per);
-    res.json({ok: true, products: rows, page});
+    res.json({ok: true, products: attachImages(rows), page});
   });
 
   router.get('/products', (req, res) => {
@@ -672,11 +927,42 @@ function buildMarketRouter() {
     const like = q.replace(/[\\%_]/g, c => '\\' + c) + '%';
     const rows = m.crossProductsFiltered.all(
       Date.now(), q, like, category, category, per, (page - 1) * per);
-    res.json({ok: true, products: rows, page});
+    res.json({ok: true, products: attachImages(rows), page});
   });
 
   router.get('/categories', (_req, res) => {
     res.json({ok: true, categories: m.categories.all(Date.now())});
+  });
+
+  /* ── تقديم صور المنتجات — موجّهة بالمحتوى ⇒ كاش دائم ────────
+   * /api/market/img/<store_id>/<sha256>.<ext> — الرابط نفسه يتغير
+   * متى تغيرت الصورة، لذا cache-control: immutable لسنة كاملة. */
+  router.get('/img/:storeId/:name', (req, res) => {
+    const match = /^([a-f0-9]{16,64})\.(webp|jpg)$/.exec(String(req.params.name || ''));
+    if (!match) {
+      return res.status(404).json({ok: false, error: 'NOT_FOUND'});
+    }
+    const storeId = Number(req.params.storeId);
+    const row = m.imageByStoreHash.get(storeId, match[1]);
+    if (row == null) {
+      return res.status(404).json({ok: false, error: 'NOT_FOUND'});
+    }
+    // الصورة تُقدَّم لمتجر منشور فقط (نفس عزل باقي الواجهات العامة)
+    const store = m.storeById.get(storeId);
+    if (store == null || store.published !== 1) {
+      return res.status(404).json({ok: false, error: 'NOT_FOUND'});
+    }
+    const file = path.join(IMAGES_DIR, String(storeId), `${match[1]}.${match[2]}`);
+    let stat = null;
+    try {
+      stat = fs.statSync(file);
+    } catch (_) {
+      return res.status(404).json({ok: false, error: 'NOT_FOUND'});
+    }
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    res.setHeader('Content-Type', match[2] === 'webp' ? 'image/webp' : 'image/jpeg');
+    res.setHeader('Content-Length', String(stat.size));
+    fs.createReadStream(file).pipe(res);
   });
 
   /* ── حسابات المستخدمين ─────────────────────────────────────── */
@@ -690,7 +976,7 @@ function buildMarketRouter() {
   }
 
   router.post('/auth/register', (req, res) => {
-    const {idNumber, name, phone} = req.body || {};
+    const {idNumber, name, phone, password} = req.body || {};
     const id = String(idNumber || '').replace(/\s+/g, '');
     const cleanName = String(name || '').trim();
     const cleanPhone = String(phone || '').replace(/[\s-]/g, '');
@@ -703,23 +989,116 @@ function buildMarketRouter() {
     if (!/^\+?\d{9,15}$/.test(cleanPhone)) {
       return res.status(400).json({ok: false, error: 'BAD_PHONE'});
     }
+    // v4.2: كلمة المرور إلزامية — لا حساب بلا حماية.
+    const pwProblem = passwordProblem(password);
+    if (pwProblem != null) {
+      return res.status(400).json({ok: false, error: pwProblem});
+    }
     if (m.userByIdNumber.get(id) != null) {
       return res.status(409).json({ok: false, error: 'ID_ALREADY_REGISTERED'});
     }
     const now = Date.now();
-    const info = m.insertUser.run(id, cleanName, cleanPhone, now, now);
+    const info = m.insertUser.run(
+      id, cleanName, cleanPhone, hashPassword(password), now, now, now);
     const user = m.userById.get(Number(info.lastInsertRowid));
     res.json({ok: true, token: issueToken(user), user: {name: user.name, idNumber: user.id_number}});
   });
 
+  /* ── login (v4.2): رقم الهوية + كلمة المرور ──────────────────
+   * مسار ترحيل واحد للحسابات المُنشأة قبل كلمات المرور: إن أرسل
+   * العميل الهاتف والحساب بلا كلمة مرور بعد → جلسة صالحة مع
+   * mustSetPassword:true فيفرض التطبيق شاشة تعيينها فوراً.
+   * الحسابات ذات كلمة مرور ترفض الدخول بالهاتف (PASSWORD_REQUIRED). */
   router.post('/auth/login', (req, res) => {
-    const {idNumber, phone} = req.body || {};
+    const {idNumber, password, phone} = req.body || {};
     const id = String(idNumber || '').replace(/\s+/g, '');
+    if (loginLocked(id)) {
+      return res.status(429).json({ok: false, error: 'ACCOUNT_LOCKED'});
+    }
+    const user = m.userByIdNumber.get(id);
+    if (user == null || user.disabled) {
+      recordLoginFail(id);
+      return res.status(403).json({ok: false, error: 'BAD_CREDENTIALS'});
+    }
+    // ترحيل: حساب قديم بلا كلمة مرور + هاتف مطابق → جلسة مؤقتة
+    if (user.password_hash == null) {
+      if (String(user.phone) !== String(phone || '').replace(/[\s-]/g, '')) {
+        recordLoginFail(id);
+        return res.status(403).json({ok: false, error: 'BAD_CREDENTIALS'});
+      }
+      clearLoginFails(id);
+      return res.json({
+        ok: true,
+        token: issueToken(user),
+        user: {name: user.name, idNumber: user.id_number},
+        mustSetPassword: true,
+      });
+    }
+    // المسار القياسي: كلمة مرور (الدخول بالهاتف مرفوض صراحة
+    // للحسابات المحمية — يعرض التطبيق حقل كلمة المرور عندئذٍ)
+    if (typeof password !== 'string' || password.length === 0) {
+      if (typeof phone === 'string' && phone.length > 0) {
+        return res.status(400).json({ok: false, error: 'PASSWORD_REQUIRED'});
+      }
+      recordLoginFail(id);
+      return res.status(403).json({ok: false, error: 'BAD_CREDENTIALS'});
+    }
+    if (!verifyPassword(password, user.password_hash)) {
+      recordLoginFail(id);
+      return res.status(403).json({ok: false, error: 'BAD_CREDENTIALS'});
+    }
+    clearLoginFails(id);
+    res.json({ok: true, token: issueToken(user), user: {name: user.name, idNumber: user.id_number}});
+  });
+
+  /* ── set-password (بالجلسة): تعيين بعد الترحيل أو تغيير بكلمة الحالية. */
+  router.post('/auth/set-password', (req, res) => {
+    const user = currentUser(req);
+    if (!user) return res.status(401).json({ok: false, error: 'AUTH_REQUIRED'});
+    const {password, currentPassword} = req.body || {};
+    const pwProblem = passwordProblem(password);
+    if (pwProblem != null) {
+      return res.status(400).json({ok: false, error: pwProblem});
+    }
+    // التغيير على حساب له كلمة مرور يتطلب الكلمة الحالية.
+    if (user.password_hash != null &&
+        (typeof currentPassword !== 'string' ||
+         !verifyPassword(currentPassword, user.password_hash))) {
+      return res.status(403).json({ok: false, error: 'BAD_CURRENT_PASSWORD'});
+    }
+    const now = Date.now();
+    m.setUserPassword.run(hashPassword(password), now, user.id);
+    audit('market_password_set', {ip: req.ip, details: {userId: user.id}});
+    res.json({ok: true});
+  });
+
+  /* ── reset: نسيت كلمة المرور (رقم الهوية + الجوال المسجل) ──
+   * ما من بوابة SMS/بريد في المنظومة — التحقق بزوج الهوية/الجوال
+   * المسجل (نفس قوة الدخول القديم) ثم تعيين كلمة جديدة وإبطال
+   * كل الجلسات. محمي بمحدد المعدل العام + قفل المحاولات أعلاه. */
+  router.post('/auth/reset', (req, res) => {
+    const {idNumber, phone, newPassword} = req.body || {};
+    const id = String(idNumber || '').replace(/\s+/g, '');
+    if (loginLocked(id)) {
+      return res.status(429).json({ok: false, error: 'ACCOUNT_LOCKED'});
+    }
+    const pwProblem = passwordProblem(newPassword);
+    if (pwProblem != null) {
+      return res.status(400).json({ok: false, error: pwProblem});
+    }
     const user = m.userByIdNumber.get(id);
     if (user == null || user.disabled ||
         String(user.phone) !== String(phone || '').replace(/[\s-]/g, '')) {
+      recordLoginFail(id);
       return res.status(403).json({ok: false, error: 'BAD_CREDENTIALS'});
     }
+    const now = Date.now();
+    db.transaction(() => {
+      m.setUserPassword.run(hashPassword(newPassword), now, user.id);
+      m.deleteTokensOfUser.run(user.id);
+    })();
+    clearLoginFails(id);
+    audit('market_password_reset', {ip: req.ip, details: {userId: user.id}});
     res.json({ok: true, token: issueToken(user), user: {name: user.name, idNumber: user.id_number}});
   });
 
