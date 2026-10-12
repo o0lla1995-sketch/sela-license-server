@@ -190,6 +190,13 @@ const m = {
     'INSERT INTO market_tokens (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)'),
   tokenByHash: db.prepare('SELECT * FROM market_tokens WHERE token_hash = ?'),
   purgeTokens: db.prepare('DELETE FROM market_tokens WHERE expires_at < ?'),
+  // v4.1: حذف الحساب — إلغاء الجلسات ثم مسح الهوية الشخصية
+  // (disabled=1 + تحرير رقم الهوية ببادئة DEL- + تفريغ الاسم/الهاتف).
+  deleteTokensOfUser: db.prepare('DELETE FROM market_tokens WHERE user_id = ?'),
+  anonymizeUser: db.prepare(
+    `UPDATE market_users SET
+       id_number = ?, name = '', phone = '', disabled = 1, last_seen_at = ?
+     WHERE id = ?`),
 
   insertOrder: db.prepare(
     `INSERT INTO market_orders
@@ -698,6 +705,32 @@ function buildMarketRouter() {
   });
 
   /* ── الطلبات ───────────────────────────────────────────────── */
+
+  /* ── حذف الحساب (سياسة جوجل بلاي: مسار حذف داخل التطبيق) ──
+   * v4.1: حذف ناعم يحقق سياسة «حذف بيانات الحساب» دون كسر
+   * سلامة الطلبات التاريخية للتجار:
+   *  • disabled = 1 → الجلسات تلغى والدخول بهذا الصف مستحيل.
+   *  • تُحذف كل رموز الجلسة فوراً (قطع الوصول الحالي).
+   *  • تُمس الهوية الشخصية: الاسم والهاتف يصبحان فارغين
+   *    ورقم الهوية يُحرَّر (بادئة DEL-) ليستطيع صاحبه التسجيل
+   *    مجدداً بنفس الهوية إن عاد.
+   *  • طلباته السابقة تبقى للتجار (سجلات فواتيرهم) دون أي
+   *    بيانات تعريف شخصية — الطلبات أصلاً لا تحمل الاسم/الهاتف.
+   */
+  router.post('/auth/delete', (req, res) => {
+    const user = currentUser(req);
+    if (!user) return res.status(401).json({ok: false, error: 'AUTH_REQUIRED'});
+    const now = Date.now();
+    db.transaction(() => {
+      m.deleteTokensOfUser.run(user.id);
+      m.anonymizeUser.run(`DEL-${user.id}-${now}`, now, user.id);
+    })();
+    audit('market_account_deleted', {
+      ip: req.ip,
+      details: {userId: user.id},
+    });
+    res.json({ok: true});
+  });
 
   router.post('/orders', (req, res) => {
     const user = currentUser(req);

@@ -351,6 +351,23 @@ async function main() {
     const stores3 = await req('GET', '/api/market/stores');
     ok('store visible again', stores3.data.stores.length === 1);
 
+    /* ── 14) حذف الحساب (سياسة جوجل بلاي) ─────────────────── */
+    const delNoAuth = await req('POST', '/api/market/auth/delete', {});
+    ok('delete without token rejected', delNoAuth.status === 401);
+    const delAcc = await req('POST', '/api/market/auth/delete', {marketToken: mtok});
+    ok('account deleted', delAcc.status === 200 && delAcc.data.ok);
+    const deadSession = await req('GET', '/api/market/orders', {marketToken: mtok});
+    ok('old token dead after deletion', deadSession.status === 401);
+    const deadLogin = await req('POST', '/api/market/auth/login',
+      {body: {idNumber: '401234567', phone: '0598765432'}});
+    ok('deleted account cannot log in', deadLogin.status === 403);
+    const reReg = await req('POST', '/api/market/auth/register',
+      {body: {idNumber: '401234567', name: 'عودة أحمد', phone: '0598765432'}});
+    ok('same id number freed for re-registration',
+      reReg.status === 200 && reReg.data.token);
+    const reOrders = await req('GET', '/api/market/orders', {marketToken: reReg.data.token});
+    ok('re-registered account starts clean', reOrders.data.orders.length === 0);
+
   } finally {
     server.kill('SIGTERM');
     await new Promise(r => setTimeout(r, 300));
