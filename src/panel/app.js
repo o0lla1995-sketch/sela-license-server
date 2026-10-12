@@ -279,6 +279,7 @@ const VIEWS = {
   keys: {title: 'مفاتيح التفعيل', fn: viewKeys},
   payments: {title: 'المدفوعات', fn: viewPayments},
   market: {title: 'المتاجر والطلبات', fn: viewMarket},
+  users: {title: 'مستخدمو المتجر', fn: viewMarketUsers},
   landing: {title: 'صفحة الهبوط', fn: viewLanding},
   contact: {title: 'التواصل', fn: viewContact},
   admins: {title: 'المشرفون', fn: viewAdmins},
@@ -1681,31 +1682,63 @@ const MARKET_STATUS_LABELS = {
   returned: ['مُرجع', 'red'],
 };
 
+/* v4.6 — شعار دائري للمتجر (صورة تطبيق نقطة البيع أو الحرف الأول) */
+function storeAvatarHtml(logoUrl, name, size) {
+  const px = size || 34;
+  if (logoUrl) {
+    return '<img class="store-logo" src="' + esc(logoUrl) + '" alt="' + esc(name) +
+      '" style="width:' + px + 'px;height:' + px + 'px" loading="lazy">';
+  }
+  return '<span class="store-logo letter" style="width:' + px + 'px;height:' + px + 'px;font-size:' +
+    Math.round(px * 0.42) + 'px">' + esc(String(name || 'م').trim().charAt(0) || 'م') + '</span>';
+}
+
+/* v4.6 — عرض التقييم نجومًا رقميًا: ★ 4.6 (12 تقييم) */
+function ratingHtml(avg, count) {
+  if (!count) return '<span class="dim tiny">لا تقييمات بعد</span>';
+  return '<span class="rating-inline">' +
+    '<svg viewBox="0 0 24 24" width="13" height="13" fill="#fbbf24" stroke="#f59e0b" stroke-width="1"><path d="M12 2l3.1 6.3 6.9 1-5 4.9 1.2 6.8L12 17.8 5.8 21l1.2-6.8-5-4.9 6.9-1z"/></svg>' +
+    '<b>' + (Number(avg) || 0).toFixed(1) + '</b>' +
+    '<small class="dim">(' + count + ')</small></span>';
+}
+
 async function viewMarket() {
   const [stats, stores] = await Promise.all([
     api('/market/stats'),
     api('/market/stores'),
   ]);
 
-  const kpi = (label, value, cls) =>
+  const kpi = (label, value, sub, cls) =>
     '<div class="kpi' + (cls ? ' ' + cls : '') + '"><div class="k-label">' + esc(label) +
-    '</div><div class="k-value">' + esc(value) + '</div></div>';
+    '</div><div class="k-value">' + value + '</div>' +
+    (sub ? '<div class="k-sub">' + sub + '</div>' : '') + '</div>';
+
+  const money = (minor) => fmtMoney((Number(minor) || 0) / 100);
+
+  /* v4.6: كان الشريط يستخدم فئة kpis غير موجودة (خطأ تاريخي) —
+   * الصحيح kpi-grid مثل بقية اللوحة، وإلا انهارت البطاقات عموديًا. */
+  const ratingSub = stats.ratingCount
+    ? 'متوسط ' + (Number(stats.ratingAvg) || 0).toFixed(1) + ' من ' + stats.ratingCount + ' تقييم'
+    : 'لا تقييمات بعد';
 
   const storeRows = (stores.stores || []).map((s) =>
     '<tr>' +
-    '<td><b>' + esc(s.name) + '</b><br><span class="dim tiny mono" dir="ltr">' + esc(s.store_number) + '</span></td>' +
-    '<td><span class="mono tiny" dir="ltr">' + esc(s.key_plain || '') + '</span></td>' +
+    '<td><div class="store-cell">' + storeAvatarHtml(s.logo_url, s.name, 34) +
+    '<div><b>' + esc(s.name) + '</b><br><span class="dim tiny mono" dir="ltr">' + esc(s.store_number) + '</span></div></div></td>' +
     '<td>' + (s.published
       ? '<span class="badge green">منشور</span>'
       : '<span class="badge">مخفي</span>') + '</td>' +
     '<td>' + (s.subscriptionActive
       ? '<span class="badge green">فعّال</span>'
       : '<span class="badge red">منتهي</span>') + '</td>' +
-    '<td class="num">' + s.products_count + '</td>' +
-    '<td class="num">' + s.orders_count +
+    '<td class="num">' + (s.products_count || 0) +
+      (s.offers_count > 0 ? ' <span class="badge orange">' + s.offers_count + ' عرض</span>' : '') + '</td>' +
+    '<td>' + ratingHtml(s.rating_avg, s.rating_count) + '</td>' +
+    '<td class="num">' + (s.orders_count || 0) +
       (s.new_orders > 0 ? ' <span class="badge amber">' + s.new_orders + ' جديد</span>' : '') + '</td>' +
     '<td class="dim tiny">' + esc(fmtDate(s.updated_at)) + '</td>' +
     '<td class="actions">' +
+    '<button class="btn small" data-mfull="' + s.id + '">بطاقة المتجر</button> ' +
     '<button class="btn ghost small" data-morders="' + s.id + '">الطلبات</button> ' +
     (s.published
       ? '<button class="btn danger small" data-munpublish="' + s.id + '">إخفاء</button>'
@@ -1717,30 +1750,34 @@ async function viewMarket() {
 
   $('#view').innerHTML =
     '<div class="page-head"><div><h1>المتاجر والطلبات (البيع أونلاين)</h1>' +
-    '<div class="sub">متجار نقاط البيع المرتبطة بمنصة سيلا ماركت</div></div></div>' +
+    '<div class="sub">إدارة متاجر نقاط البيع في منصة سيلا ماركت — البطاقات، العروض، التقييمات والمستخدمون</div></div></div>' +
 
-    '<div class="card" style="padding:14px"><div class="kpis">' +
-    kpi('متاجر مسجلة', String(stats.stores || 0)) +
-    kpi('متاجر منشورة', String(stats.publishedStores || 0), 'green') +
-    kpi('منتجات معروضة', String(stats.products || 0)) +
-    kpi('مستخدمو المتجر', String(stats.users || 0)) +
-    kpi('إجمالي الطلبات', String(stats.orders || 0)) +
-    kpi('طلبات جديدة', String(stats.newOrders || 0), 'amber') +
-    kpi('طلبات مُسلّمة', String(stats.deliveredOrders || 0), 'green') +
-    kpi('قيمة البضاعة المبيعة', fmtMoney((stats.gmvMinor || 0) / 100)) +
+    '<div class="card" style="padding:14px"><div class="kpi-grid">' +
+    kpi('متاجر مسجلة', String(stats.stores || 0), (stats.publishedStores || 0) + ' منشورة') +
+    kpi('منتجات معروضة', String(stats.products || 0),
+      (stats.discountedProducts || 0) + ' عليها عروض تخفيضات', 'accent') +
+    kpi('مستخدمو المتجر', String(stats.users || 0),
+      (stats.activeUsers || 0) + ' نشط آخر 30 يومًا · ' + (stats.addresses || 0) + ' عنوان') +
+    kpi('إجمالي الطلبات', String(stats.orders || 0),
+      (stats.newOrders || 0) + ' جديد · ' + (stats.deliveredOrders || 0) + ' مُسلّم') +
+    kpi('قيمة البضاعة المبيعة', money(stats.gmvMinor),
+      'وفّر المستخدمون ' + money(stats.discountMinor) + ' من عروض التخفيضات', 'green') +
+    kpi('تقييم المتاجر', (stats.ratingAvg != null ? (Number(stats.ratingAvg)).toFixed(1) : '—') + ' <small>/5</small>',
+      ratingSub, 'accent') +
     '</div></div>' +
 
     '<div class="card">' +
     ((stores.stores || []).length
       ? '<div class="table-wrap"><table class="tbl"><thead><tr>' +
-        '<th>المتجر</th><th>المفتاح</th><th>النشر</th><th>الاشتراك</th><th>منتجات</th>' +
-        '<th>طلبات</th><th>آخر تحديث</th><th></th>' +
+        '<th>المتجر</th><th>النشر</th><th>الاشتراك</th><th>منتجات</th>' +
+        '<th>التقييم</th><th>طلبات</th><th>آخر تحديث</th><th></th>' +
         '</tr></thead><tbody>' + storeRows + '</tbody></table></div>'
       : '<div class="empty">لا متاجر بعد — تُنشأ تلقائياً عندما يفعّل التاجر «البيع أونلاين» من تطبيق نقطة البيع</div>') +
     '</div>' +
 
     '<div class="card"><div class="card-title">آخر الطلبات</div>' +
-    '<div id="marketOrdersBox"><div class="empty">اختر «الطلبات» من جدول المتاجر</div></div></div>';
+    '<div class="card-title hint">اختر «الطلبات» من جدول المتاجر لتظهر هنا</div>' +
+    '<div id="marketOrdersBox"><div class="empty">لا طلبات محمّلة</div></div></div>';
 
   $$('[data-munpublish]').forEach((b) => {
     b.onclick = () =>
@@ -1764,6 +1801,219 @@ async function viewMarket() {
   $$('[data-morders]').forEach((b) => {
     b.onclick = () => loadMarketOrders(Number(b.getAttribute('data-morders'))).catch(showErr);
   });
+  $$('[data-mfull]').forEach((b) => {
+    b.onclick = () => openStoreFullModal(Number(b.getAttribute('data-mfull'))).catch(showErr);
+  });
+}
+
+/* ═══════════════════ VIEW: market users (مستخدمو المتجر) ═══════════════════
+ * v4.6 — طلب الجولة 9: «الخيارات والعمليات التي يمكن للادمن أجراها
+ * علي المستخدمين او نقاط البيع». المستخدمون: تعطيل فوري (يبطل كل
+ * جلساته المفتوحة) وإعادة تفعيل، مع إحصاءات كل مستخدم. */
+async function viewMarketUsers() {
+  const d = await api('/market/users');
+  const users = d.users || [];
+  const active30 = users.filter((u) => !u.disabled && u.last_seen_at > Date.now() - 30 * 86400000).length;
+  const disabled = users.filter((u) => u.disabled).length;
+
+  const kpi = (label, value, sub, cls) =>
+    '<div class="kpi' + (cls ? ' ' + cls : '') + '"><div class="k-label">' + esc(label) +
+    '</div><div class="k-value">' + value + '</div>' +
+    (sub ? '<div class="k-sub">' + sub + '</div>' : '') + '</div>';
+
+  const rows = users.map((u) =>
+    '<tr' + (u.disabled ? ' class="row-off"' : '') + '>' +
+    '<td><b>' + esc(u.name || 'مستخدم سيلا') + '</b>' +
+    (u.disabled ? ' <span class="badge red">معطّل</span>' : '') + '</td>' +
+    '<td class="mono tiny" dir="ltr">' + esc(u.phone || '') + '</td>' +
+    '<td class="mono tiny" dir="ltr">' + esc(u.id_number || '') + '</td>' +
+    '<td class="num">' + (u.orders_count || 0) +
+      (u.delivered_count > 0 ? ' <span class="badge green">' + u.delivered_count + ' مُسلّم</span>' : '') + '</td>' +
+    '<td class="num">' + (u.addresses_count || 0) + '</td>' +
+    '<td class="num">' + (u.ratings_count || 0) + '</td>' +
+    '<td class="dim tiny">' + esc(fmtDateTime(u.last_seen_at)) + '</td>' +
+    '<td class="actions">' +
+    (u.disabled
+      ? '<button class="btn success small" data-uenable="' + u.id + '">تفعيل</button>'
+      : '<button class="btn danger small" data-udisable="' + u.id + '">تعطيل</button>') +
+    '</td></tr>'
+  ).join('');
+
+  $('#view').innerHTML =
+    '<div class="page-head"><div><h1>مستخدمو المتجر</h1>' +
+    '<div class="sub">حسابات تطبيق سيلا ماركت — التعطيل يبطل جلساتهم المفتوحة فوراً</div></div></div>' +
+
+    '<div class="card" style="padding:14px"><div class="kpi-grid">' +
+    kpi('إجمالي المستخدمين', String(users.length), active30 + ' نشط آخر 30 يومًا') +
+    kpi('حسابات معطّلة', String(disabled), disabled ? 'فعّلها من العمود الأخير' : 'لا أحد معطّل', disabled ? 'amber' : 'green') +
+    kpi('طلبات مُسلّمة', String(users.reduce((a, u) => a + (u.delivered_count || 0), 0)), 'طلبات وصلت أصحابها', 'green') +
+    kpi('تقييمات كتبها المستخدمون', String(users.reduce((a, u) => a + (u.ratings_count || 0), 0)), 'تقييمات موثّقة بعد التسليم', 'accent') +
+    '</div></div>' +
+
+    '<div class="card">' +
+    (users.length
+      ? '<div class="table-wrap"><table class="tbl"><thead><tr>' +
+        '<th>المستخدم</th><th>الهاتف</th><th>رقم الهوية</th><th>طلبات</th>' +
+        '<th>عناوين</th><th>تقييمات</th><th>آخر ظهور</th><th></th>' +
+        '</tr></thead><tbody>' + rows + '</tbody></table></div>'
+      : '<div class="empty">لا مستخدمين بعد — يُنشؤون حساباتهم من تطبيق سيلا ماركت</div>') +
+    '</div>';
+
+  $$('[data-udisable]').forEach((b) => {
+    b.onclick = () =>
+      confirmModal('تعطيل الحساب',
+        'سيُمنع المستخدم من الدخول فوراً وتُبطل كل جلساته المفتوحة، ويرى رسالة «الحساب معطّل» عند المحاولة. بياناته وطلباته محفوظة ويمكن تفعيله لاحقًا.',
+        'تعطيل', async () => {
+          await api('/market/users/' + b.getAttribute('data-udisable') + '/disable',
+            {method: 'POST', body: {disabled: true}});
+          toast('تم تعطيل الحساب وإبطال جلساته', 'success');
+          viewMarketUsers().catch(showErr);
+        });
+  });
+  $$('[data-uenable]').forEach((b) => {
+    b.onclick = async () => {
+      try {
+        await api('/market/users/' + b.getAttribute('data-uenable') + '/disable',
+          {method: 'POST', body: {disabled: false}});
+        toast('تم تفعيل الحساب', 'success');
+        viewMarketUsers().catch(showErr);
+      } catch (err) { showErr(err); }
+    };
+  });
+}
+
+/* ═══════════════════ FULL STORE CARD (بطاقة المتجر الكاملة) ═══════════════════
+ * v4.6 — GET /market/stores/:id/full: الملف + الشعار + مناطق التوصيل +
+ * الكتالوج بالخصومات والصور + التقييمات + الطلبات، مع تعديل الملف
+ * من الإدارة مباشرة (POST /market/stores/:id/profile). */
+async function openStoreFullModal(storeId) {
+  const d = await api('/market/stores/' + storeId + '/full');
+  const s = d.store || {};
+  const products = d.products || [];
+  const reviews = d.reviews || [];
+  const orders = d.orders || [];
+
+  const productRows = products.slice(0, 120).map((p) => {
+    const price = (Number(p.price_minor) || 0) / 100;
+    const disc = Number(p.discount_pct) || 0;
+    const final = disc > 0 ? price * (1 - disc / 100) : price;
+    return '<tr>' +
+      '<td><b>' + esc(p.name) + '</b>' +
+      (p.category ? '<br><span class="dim tiny">' + esc(p.category) + '</span>' : '') + '</td>' +
+      '<td class="num">' + (disc > 0
+        ? '<s class="dim">' + fmtMoney(price) + '</s> <b>' + fmtMoney(final) + '</b> <span class="badge orange">-' + disc + '%</span>'
+        : fmtMoney(price)) + '</td>' +
+      '<td class="num">' + (p.stock != null ? p.stock : '—') + '</td>' +
+      '<td class="num">' + (p.images && p.images.length
+        ? '<span class="badge blue">' + p.images.length + ' صورة</span>'
+        : '<span class="dim tiny">بلا صور</span>') + '</td>' +
+      '</tr>';
+  }).join('');
+
+  const reviewRows = reviews.slice(0, 20).map((r) =>
+    '<div class="tl-row"><span class="tl-time">' + esc(fmtDateTime(r.createdAt)) + '</span>' +
+    '<span class="tl-event">' + ratingHtml(r.stars, 0).replace('(' + 0 + ')', '').trim() + '</span>' +
+    '<span class="tl-detail">' + esc(r.userName) + ' — ' + esc(r.comment || 'بلا تعليق') + '</span></div>'
+  ).join('');
+
+  const orderRows = orders.slice(0, 25).map((o) => {
+    const st = MARKET_STATUS_LABELS[o.status] || [o.status, ''];
+    return '<div class="tl-row">' +
+      '<span class="tl-time">' + esc(fmtDateTime(o.created_at)) + '</span>' +
+      '<span class="tl-event">' + esc(o.order_number) + '</span>' +
+      '<span class="badge ' + st[1] + '">' + st[0] + '</span>' +
+      '<span class="tl-detail">' + esc(o.user_name || '') + ' · ' + fmtMoney(o.total_minor / 100) +
+      ' · ' + (o.items_count || 0) + ' أصناف' +
+      (o.rating_stars ? ' · قيّمه ★' + o.rating_stars : '') + '</span></div>';
+  }).join('');
+
+  const regions = (d.deliveryRegions || []).map((r) =>
+    '<span class="chip static">' + esc(r.region) +
+    (r.fee_minor != null ? ' — ' + fmtMoney(r.fee_minor / 100) : '') + '</span>'
+  ).join('');
+
+  showModal(
+    '<div class="store-hero">' +
+    storeAvatarHtml(s.logo_url, s.name, 56) +
+    '<div class="grow">' +
+    '<h3 style="margin:0 0 4px">' + esc(s.name) + '</h3>' +
+    '<div class="store-hero-meta">' +
+    '<span class="dim tiny mono" dir="ltr">' + esc(s.store_number || '') + '</span> ' +
+    (s.published ? '<span class="badge green">منشور</span>' : '<span class="badge">مخفي</span>') + ' ' +
+    (s.subscriptionActive ? '<span class="badge green">اشتراك فعّال</span>' : '<span class="badge red">اشتراك منتهي</span>') + ' ' +
+    ratingHtml(d.rating, d.ratingCount) +
+    '</div></div></div>' +
+
+    '<form id="storeProfileForm">' +
+    '<div class="card-title" style="margin-top:18px">ملف المتجر (يظهر في تطبيق المستخدمين)</div>' +
+    '<div class="row-2">' +
+    '<div class="field"><label>اسم المتجر</label>' +
+    '<input class="input" id="spName" maxlength="80" required value="' + esc(s.name || '') + '"></div>' +
+    '<div class="field"><label>التصنيف</label>' +
+    '<input class="input" id="spCategory" maxlength="40" placeholder="مطاعم، ملابس…" value="' + esc(s.category || '') + '"></div>' +
+    '</div>' +
+    '<div class="row-2">' +
+    '<div class="field"><label>المنطقة الرئيسية</label>' +
+    '<input class="input" id="spRegion" maxlength="60" value="' + esc(s.region || '') + '"></div>' +
+    '<div class="field"><label>الهاتف</label>' +
+    '<input class="input" id="spPhone" maxlength="24" dir="ltr" value="' + esc(s.phone || '') + '"></div>' +
+    '</div>' +
+    '<div class="row-2">' +
+    '<div class="field"><label>واتساب</label>' +
+    '<input class="input" id="spWhatsapp" maxlength="24" dir="ltr" value="' + esc(s.whatsapp || '') + '"></div>' +
+    '<div class="field"><label>الوصف</label>' +
+    '<input class="input" id="spDescription" maxlength="400" placeholder="جملة تعريفية قصيرة" value="' + esc(s.description || '') + '"></div>' +
+    '</div>' +
+    '<div class="flex">' +
+    '<button type="submit" class="btn primary" id="spSave">حفظ التعديلات</button>' +
+    '<span class="dim tiny">يتحكم به التاجر من نقطة البيع — التعديل هنا يُطبَّق فورًا على المتجر</span></div>' +
+    '</form>' +
+
+    '<div class="card-title" style="margin-top:18px">مناطق التوصيل</div>' +
+    '<div class="chips">' + (regions || '<span class="dim tiny">لم يضف التاجر مناطق بعد</span>') + '</div>' +
+
+    '<div class="card-title" style="margin-top:18px">الكتالوج (' + products.length + ' منتجًا معروضًا)</div>' +
+    (products.length
+      ? '<div class="table-wrap" style="max-height:300px;overflow:auto"><table class="tbl"><thead><tr>' +
+        '<th>المنتج</th><th>السعر</th><th>المخزون</th><th>الصور</th>' +
+        '</tr></thead><tbody>' + productRows + '</tbody></table></div>'
+      : '<div class="empty">لا منتجات معروضة — يضيفها التاجر من نقطة البيع</div>') +
+
+    '<div class="card-title" style="margin-top:18px">تقييمات العملاء (' + d.ratingCount + ')</div>' +
+    (reviewRows || '<div class="empty">لا تقييمات بعد</div>') +
+
+    '<div class="card-title" style="margin-top:18px">آخر الطلبات</div>' +
+    (orderRows || '<div class="empty">لا طلبات</div>') +
+
+    '<div class="modal-actions" style="margin-top:18px">' +
+    '<button class="btn ghost" id="sfClose">إغلاق</button>' +
+    '</div>',
+    true /* wide */
+  );
+
+  $('#sfClose').onclick = closeModal;
+
+  $('#storeProfileForm').onsubmit = async (ev) => {
+    ev.preventDefault();
+    const btn = $('#spSave');
+    btn.disabled = true;
+    try {
+      await api('/market/stores/' + storeId + '/profile', {method: 'POST', body: {
+        name: $('#spName').value.trim(),
+        category: $('#spCategory').value.trim(),
+        region: $('#spRegion').value.trim(),
+        phone: $('#spPhone').value.trim(),
+        whatsapp: $('#spWhatsapp').value.trim(),
+        description: $('#spDescription').value.trim(),
+      }});
+      toast('تم حفظ ملف المتجر', 'success');
+      closeModal();
+      viewMarket().catch(showErr);
+    } catch (err) {
+      showErr(err);
+      btn.disabled = false;
+    }
+  };
 }
 
 async function loadMarketOrders(storeId) {
@@ -1776,6 +2026,8 @@ async function loadMarketOrders(storeId) {
       '<span class="badge ' + st[1] + '">' + st[0] + '</span>' +
       '<span class="tl-detail">' + esc(o.user_name || '') + ' · ' + esc(o.user_phone || '') +
       ' · ' + esc(o.store_name || '') + ' · ' + fmtMoney(o.total_minor / 100) +
+      ' · ' + (o.items_count || 0) + ' أصناف' +
+      (o.rating_stars ? ' · ★' + o.rating_stars : '') +
       (o.invoice_ref ? ' · <span class="mono" dir="ltr">' + esc(o.invoice_ref) + '</span>' : '') +
       '</span></div>';
   }).join('');

@@ -1640,7 +1640,11 @@ function buildMarketRouter() {
       })(),
       store: (() => {
         const s = m.storeById.get(o.store_id);
-        return s ? {id: s.id, name: s.name, storeNumber: s.store_number} : null;
+        if (s == null) return null;
+        const logo = storeLogoUrl(s);
+        return logo != null
+          ? {id: s.id, name: s.name, storeNumber: s.store_number, logo_url: logo}
+          : {id: s.id, name: s.name, storeNumber: s.store_number};
       })(),
     }));
     res.json({ok: true, orders});

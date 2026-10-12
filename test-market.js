@@ -794,6 +794,50 @@ async function main() {
     const disabledOrder = await req('GET', '/api/market/orders', {marketToken: buyer.data.token});
     ok('disabled user session revoked', disabledOrder.status === 401);
 
+    /* v4.6 — تحديث محتوى صفحة الهبوط (هجرة معلَّمة بإصدار) */
+    const site = await req('GET', '/api/public/site');
+    const feats = (site.data.features || []).map(f => f.icon);
+    ok('landing v2 content: hero mentions online store',
+      site.status === 200 && /سيلا ماركت/.test(site.data.hero.subtitle || '') &&
+      /متجر أونلاين/.test(site.data.hero.title || '') && /منظومة/.test(site.data.hero.badge || ''),
+      JSON.stringify(site.data.hero || {}));
+    ok('landing v2 content: new ecosystem features present',
+      feats.includes('mall') && feats.includes('percent') &&
+      feats.includes('star') && feats.includes('fingerprint'),
+      'icons=' + feats.join(','));
+    ok('landing v2 content: version marker applied once',
+      site.status === 200 && (site.data.features || []).length === 10,
+      'features=' + (site.data.features || []).length);
+    // idempotence: markers/edits by the admin survive (no re-run on same version)
+
+    /* v4.6 — طلبات العميل تحمل logo_url للمتجر (مطلوب لبطاقات الطلبات في
+     * التطبيق: OrderListCard بصورة حقيقية بدل حرف). أعدنا تفعيل المشتري
+     * أولاً لأن اختبار التعطيل السابق أبطل جلسته، ثم سجّل دخوله من
+     * جديد — التعطيل يمحو الجلسات ولا يستعيدها التفعيل. وأعدنا رفع
+     * شعار المتجر لأن اختبار «logo:null» السابق أزاله. */
+    const reenable = await req('POST', `/api/admin/market/users/${buyerId}/disable`,
+      {token: 'root-master-token', body: {disabled: false}});
+    ok('admin user re-enable', reenable.status === 200);
+    const regLogo2 = await req('POST', '/api/v1/store/register', {
+      body: {
+        ...auth,
+        store: {name: 'سوبر ماركت النور ٢', phone: '0591234567'},
+        deliveryRegions: [{name: 'المركز', feeMinor: 1200}, {name: 'المخيم', feeMinor: 1500}],
+        published: true,
+        logo: {data: fakeWebp('B').toString('base64'), ext: 'webp', width: 512, height: 512},
+      },
+    });
+    ok('store logo re-uploaded for orders test',
+      regLogo2.status === 200 && regLogo2.data.store.logoUrl != null);
+    const buyerRelogin = await req('POST', '/api/market/auth/login',
+      {body: {idNumber: buyer.data.user.idNumber, password: 'buyer-12345'}});
+    ok('re-enabled user can login again', buyerRelogin.status === 200 && buyerRelogin.data.token);
+    const buyerOrders = await req('GET', '/api/market/orders', {marketToken: buyerRelogin.data.token});
+    const bo = (buyerOrders.data.orders || []).find(o => o.store_id === 1);
+    ok('customer orders carry store logo_url',
+      buyerOrders.status === 200 && bo && bo.store && bo.store.logo_url != null,
+      JSON.stringify(bo && bo.store));
+
 
   } finally {
     server.kill('SIGTERM');

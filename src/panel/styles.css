@@ -1033,3 +1033,63 @@ body.drawer-open { overflow: hidden; }
 .flex-between { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .wrap { flex-wrap: wrap; }
 .grow { flex: 1; }
+
+/* ═══════════════════ v4.6 — market management upgrade ═══════════════════ */
+
+/* شعار المتجر الدائري (صورة تطبيق نقطة البيع أو الحرف الأول) */
+.store-logo {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  object-fit: cover;
+  flex: 0 0 auto;
+  background: var(--surface-3);
+  border: 1.5px solid rgba(249, 115, 22, 0.4);
+  box-shadow: 0 0 0 2.5px rgba(249, 115, 22, 0.12);
+}
+.store-logo.letter {
+  color: var(--orange-2);
+  font-weight: 900;
+  background: var(--orange-soft);
+}
+
+/* خلية اسم المتجر في الجدول: شعار + اسم/رقم */
+.store-cell { display: flex; align-items: center; gap: 10px; }
+.store-cell > div { min-width: 0; }
+
+/* تقييم مضمّن: ★ 4.6 (12) */
+.rating-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  direction: ltr;
+  white-space: nowrap;
+}
+.rating-inline b { color: var(--ink); font-size: 13px; }
+.rating-inline small { font-size: 11px; }
+
+/* ترويسة بطاقة المتجر داخل النافذة */
+.store-hero {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px;
+  border-radius: 14px;
+  background: linear-gradient(135deg, rgba(249, 115, 22, 0.13), rgba(249, 115, 22, 0.04));
+  border: 1px solid rgba(249, 115, 22, 0.28);
+}
+.store-hero-meta {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+
+/* شريحة معلومة (غير قابلة للنقر) في نافذة المتجر */
+.chip.static { cursor: default; }
+.chip.static:hover { color: var(--ink-soft); }
+
+/* صف مستخدم معطّل */
+.tbl tr.row-off td { opacity: 0.55; }
+.tbl tr.row-off td .badge.red { opacity: 1; }

@@ -182,6 +182,45 @@ CREATE TABLE IF NOT EXISTS audit (
   }
 })();
 
+/* ── محتوى صفحة الهبوط — جيل 2 (v4.6): مصدر واحد تُشترك فيه
+ * بذور الإقلاع الأول (DEFAULT_SETTINGS) وهجرة التحديث (أسفل الملف)
+ * حتى تتطابق قواعد البيانات الجديدة والقديمة على الجيل نفسه. ──── */
+const LANDING_CONTENT_V2 = {
+  badge: 'من نقطة البيع إلى باب العميل — منظومة سيلا كاملة',
+  title: 'سيلا — دفتر متجرك الذكي… ومتجر أونلاين يبيع نيابة عنك',
+  subtitle:
+    'نقاط بيع بالكاميرا الذكية، دفتر ديون، مخزون وتقارير وطباعة فورية — ' +
+    'والآن انشر متجرك بضغطة واحدة في تطبيق سيلا ماركت: منتجاتك، صورك، ' +
+    'وعروض تخفيضاتك أمام آلاف المشترين على هواتفهم.',
+  ctaText: 'جرّب سيلا مجانًا — وانشر متجرك أونلاين اليوم',
+  footerNote: 'سيلا — منظومة إدارة المتاجر: نقطة البيع + المتجر أونلاين + نظام الاشتراكات',
+  seo:
+    'تطبيق سيلا لإدارة المتاجر: نقاط بيع بالكاميرا الذكية، دفتر ديون، مخزون، تقارير وطباعة — ' +
+    'مع متجر أونلاين مدمج (سيلا ماركت): انشر منتجاتك بعروضك وصورك وتقييمات عملائك.',
+  features: [
+    {icon: 'scan', title: 'بيع بالكاميرا الذكية',
+     text: 'وجّه الكاميرا لأي منتج وتعرّف عليه فوراً وبيعه بلمسة واحدة — أسرع طريق لإتمام البيع.'},
+    {icon: 'book', title: 'دفتر ديون إلكتروني',
+     text: 'سجّل ديون الزبائن مع سداد موثّق وتنبيهات تلقائية — لا دفتر ورقي ولا نسيان بعد اليوم.'},
+    {icon: 'store', title: 'يناسب كل المتاجر',
+     text: 'أنماط جاهزة للملابس والصيدليات والمطاعم والمقاهي والبقالة والفواكه — لكل متجر تجربته.'},
+    {icon: 'boxes', title: 'مخزون وتنبيهات',
+     text: 'تتبّع الكميات والمخزون بدقة مع تنبيهات النفاد التلقائية وخصم تلقائي مع كل عملية بيع.'},
+    {icon: 'chart', title: 'تقارير تديرها بنفسك',
+     text: 'أرباح ومبيعات وأداء الساعات وأفضل المنتجات — تقارير واضحة تساعدك تقرر بثقة.'},
+    {icon: 'printer', title: 'طباعة فورية',
+     text: 'فاتورة حرارية للزبون مع دعم الطابعات البلوتوث — اطبع فور إتمام البيع بضغطة زر.'},
+    {icon: 'mall', title: 'متجرك أونلاين بضغطة واحدة',
+     text: 'فعّل «البيع أونلاين» من نقطة البيع فيُنشر متجرك فوراً في تطبيق سيلا ماركت — منتجاتك وصورك وشعارك أمام آلاف المشترين، بلا موقع ولا رسوم إضافية.'},
+    {icon: 'percent', title: 'عروض وتخفيضات تُحسب تلقائيًا',
+     text: 'ضع خصمًا على أي منتج من نقطة البيع فيظهر فورًا للمشتري بسعره الجديد والقديم مشطوبًا — وتُسعَّر الطلبات على الخادم بالسعر بعد الخصم دون أي تدخل.'},
+    {icon: 'star', title: 'تقييمات موثّقة بعد التسليم',
+     text: 'يقيّم عملاؤك متجرك بعد كل طلب يصلهم — نجومك وتعليقاتهم تعلّم ملف متجرك في السوق وتبني سمعته.'},
+    {icon: 'fingerprint', title: 'دخول آمن بالبصمة',
+     text: 'دخول المشترين لحساباتهم ببصمة الإصبع مباشرة بلا كلمة مرور — تجربة فتح سريعة كتطبيقات البنوك.'},
+  ],
+};
+
 // ── default settings (first boot only — never overwrite) ────────
 const DEFAULT_SETTINGS = {
   contact_phone: process.env.CONTACT_PHONE || '',
@@ -194,24 +233,15 @@ const DEFAULT_SETTINGS = {
   price_monthly: '50',
   price_quarterly: '120',
   price_yearly: '400',
-  // ── landing page content (v3 — managed from the panel) ──
-  landing_hero_badge: 'التطبيق الأول لإدارة المتاجر والديون',
-  landing_hero_title: 'سيلا — دفتر متجرك الذكي في جيبك',
-  landing_hero_subtitle:
-    'نقاط بيع كاملة بالكاميرا الذكية، دفتر ديون منظّم، مخزون وتقارير دقيقة، وطباعة فورية — كل متجرك في تطبيق واحد يعمل بدون إنترنت.',
-  landing_cta_text: 'حمّل التطبيق الآن مجاناً',
+  // ── landing page content: جيل 2 — منظومة البيع أونلاين ──
+  landing_hero_badge: LANDING_CONTENT_V2.badge,
+  landing_hero_title: LANDING_CONTENT_V2.title,
+  landing_hero_subtitle: LANDING_CONTENT_V2.subtitle,
+  landing_cta_text: LANDING_CONTENT_V2.ctaText,
   landing_show_pricing: '1',
-  site_footer_note: 'سيلا — نظام إدارة المتاجر والاشتراكات',
-  site_seo_description:
-    'تطبيق سيلا لإدارة المتاجر: نقاط بيع، دفتر ديون، مخزون، تقارير وطباعة — يعمل بدون إنترنت ويناسب كل أنواع المتاجر.',
-  landing_features: JSON.stringify([
-    {icon: 'scan', title: 'بيع بالكاميرا الذكية', text: 'وجّه الكاميرا لأي منتج وتعرّف عليه فوراً وبيعه بلمسة واحدة — أسرع طريق لإتمام البيع.'},
-    {icon: 'book', title: 'دفتر ديون إلكتروني', text: 'سجّل ديون الزبائن مع سداد موثّق وتنبيهات تلقائية — لا دفتر ورقي ولا نسيان بعد اليوم.'},
-    {icon: 'store', title: 'يناسب كل المتاجر', text: 'أنماط جاهزة للملابس والصيدليات والمطاعم والمقاهي والبقالة والفواكه — لكل متجر تجربته.'},
-    {icon: 'boxes', title: 'مخزون وتنبيهات', text: 'تتبّع الكميات والمخزون بدقة مع تنبيهات النفاد التلقائية وخصم تلقائي مع كل عملية بيع.'},
-    {icon: 'chart', title: 'تقارير تديرها بنفسك', text: 'أرباح ومبيعات وأداء الساعات وأفضل المنتجات — تقارير واضحة تساعدك تقرر بثقة.'},
-    {icon: 'printer', title: 'طباعة فورية', text: 'فاتورة حرارية للزبون مع دعم الطابعات البلوتوث — اطبع فور إتمام البيع بضغطة زر.'},
-  ]),
+  site_footer_note: LANDING_CONTENT_V2.footerNote,
+  site_seo_description: LANDING_CONTENT_V2.seo,
+  landing_features: JSON.stringify(LANDING_CONTENT_V2.features),
 };
 {
   const insertDefault = db.prepare(
@@ -573,5 +603,29 @@ function audit(event, {keyId = null, deviceId = null, adminId = null, ip = null,
     details ? JSON.stringify(details) : null,
   );
 }
+
+/* ── v4.6: تحديث محتوى صفحة الهبوط بما يتناسب مع المميزات الجديدة ──
+ * إعدادات اللاندنج تُزرع مرة واحدة فقط (INSERT OR IGNORE) ولا تلمس
+ * بعدها أبدًا — لذلك النشرات السابقة بقيت بنسخة المحتوى القديمة رغم
+ * كل تطويرات المنظومة (طلب الجولة 9: «وايضا صفحة الاندنج بيج بما
+ * يتناسب مع المميزات الجديدة»). هذه الهجرة تُحدّث المحتوى مرة واحدة
+ * لكل جيل، معلَّمة بإصدار محتوى: كلما ارتفع LANDING_CONTENT_VERSION
+ * تغيّر المحتوى عند الإقلاع التالي؛ وما يعدّله المشرف بعدها من
+ * اللوحة يبقى محفوظًا حتى الجيل الذي يليه. */
+const LANDING_CONTENT_VERSION = 2;
+
+(function refreshLandingContent() {
+  const applied = Number(getSetting('landing_content_version', 0)) || 0;
+  if (applied >= LANDING_CONTENT_VERSION) return;
+
+  setSetting('landing_hero_badge', LANDING_CONTENT_V2.badge);
+  setSetting('landing_hero_title', LANDING_CONTENT_V2.title);
+  setSetting('landing_hero_subtitle', LANDING_CONTENT_V2.subtitle);
+  setSetting('landing_cta_text', LANDING_CONTENT_V2.ctaText);
+  setSetting('site_seo_description', LANDING_CONTENT_V2.seo);
+  setSetting('site_footer_note', LANDING_CONTENT_V2.footerNote);
+  setSetting('landing_features', JSON.stringify(LANDING_CONTENT_V2.features));
+  setSetting('landing_content_version', String(LANDING_CONTENT_VERSION));
+})();
 
 module.exports = {db, stmt, getSetting, setSetting, audit, DATA_DIR};
