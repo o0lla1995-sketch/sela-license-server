@@ -6,7 +6,7 @@
   "type": "commonjs",
   "scripts": {
     "start": "node src/server.js",
-    "test": "node test-local.js && node test-market.js",
+    "test": "node test-local.js && node test-market.js && node test-maintenance.js",
     "test:license": "node test-local.js",
     "test:market": "node test-market.js"
   },

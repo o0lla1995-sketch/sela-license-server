@@ -2371,10 +2371,144 @@ function buildMarketAdminRouter() {
          FROM market_orders WHERE status IN ('sent','delivered','returned')`).get().v,
       discountMinor: db.prepare(
         `SELECT COALESCE(SUM(items_discount_minor), 0) v FROM market_orders`).get().v,
+      /* v5.3: تقرير آخر تنظيف احترافي — يعرض في لوحة الإدارة
+       * (المدير يرى بعينه ماذا حُذف من بيانات وصور ومتى). */
+      maintenance: lastMaintenanceReport,
     });
   });
 
   return router;
+}
+
+/* ════ v5.3: التنظيف الدوري الاحترافي — طلب التاجر بالنص ══════
+ * «لا اريد ان يتم الضغط علي السيرفر بسبب كثرة البيانات والمنتجات
+ *  وخصوصا التي لم تعد موجودة وتم حذفها او ايقافها واخفائها وخصوص
+ *  الصور حيث يتم التنظيف بشكل احترافي لتحسين ذاكرة التخزين الخاصة
+ *  بالمتجر والتنظيف الدوري».
+ *
+ * كل ٦ ساعات (+٣٠ ثانية من الإقلاع):
+ *  1) منتجات هجرتها مزامنة POS > ١٤ يوماً (available=0) تُحذف نهائياً
+ *     — قرارات إخفاء الإدارة محفوظة (لا تُمس أبداً). روابط صورها
+ *     تُحذف تِبَعاً (ON DELETE CASCADE). سجل الطلبات محفوظ دائماً
+ *     (عناصر الطلب لقطات مستقلة بلا FK).
+ *  2) كنس الصور اليتيمة لكل متجر (بلا منتج يشير إليها) — صفوف
+ *     وملفات، حماية شعار المتجر الحالي.
+ *  3) ملفات على القرص بلا صف في القاعدة (بقايا/ترقيات) — سقف/دورة.
+ *  4) رموز استعادة كلمة المرور المنتهية + سجل التدقيق > ٩٠ يوماً.
+ *  5) PRAGMA wal_checkpoint(TRUNCATE) + optimize — قاعدة رشيقة.
+ * التقرير الأخير يظهر في /stats (maintenance) للوحة الإدارة. */
+const MAINTENANCE_INTERVAL_MS = 6 * 3600 * 1000;
+const MAINTENANCE_BOOT_DELAY_MS = 30 * 1000;
+const PRODUCT_GRAVE_DAYS = 14;
+/* سماحية احتفاظ بصفوف الرموز المنتهية قبل حذفها من القاعدة —
+ * غير صلاحية الرمز نفسها (١٠ دقائق)؛ هذا تنظيف صفوفها الميتة. */
+const MAINT_RESET_RETENTION_MS = 60 * 60 * 1000;
+const AUDIT_RETENTION_DAYS = 90;
+const STRAY_FILES_CAP = 400;
+
+let lastMaintenanceReport = null;
+
+function maintenanceSweep() {
+  const now = Date.now();
+  const report = {
+    at: now,
+    productsDeleted: 0,
+    orphanImagesDeleted: 0,
+    filesUnlinked: 0,
+    strayFilesDeleted: 0,
+    resetCodesPurged: 0,
+    auditPurged: 0,
+    walCheckpoint: false,
+    errors: [],
+  };
+  try {
+    /* 1) منتجات مهجورة > ١٤ يوماً — حذف نهائي ( CASCADE يمس روابط
+     *    صورها). قرارات الإدارة (admin_hidden) محفوظة بشرط NOT IN. */
+    const grave = now - PRODUCT_GRAVE_DAYS * DAY_MS;
+    const doomed = db.prepare(
+      `SELECT id FROM store_products WHERE available = 0 AND updated_at < ?
+         AND id NOT IN (SELECT product_id FROM admin_hidden_products)`,
+    ).all(grave);
+    if (doomed.length > 0) {
+      const del = db.prepare('DELETE FROM store_products WHERE id = ?');
+      db.transaction(() => {
+        for (const row of doomed) {
+          report.productsDeleted += del.run(row.id).changes;
+        }
+      })();
+    }
+
+    /* 2+3) لكل متجر: يتامى القاعدة + ملفات القرص بلا صف. */
+    const stores = db.prepare('SELECT id, logo_image_id FROM stores').all();
+    const hashesOfStore = db.prepare('SELECT hash, ext FROM store_images WHERE store_id = ?');
+    for (const store of stores) {
+      try {
+        const orphans = m.orphanImages.all(store.id)
+          .filter(o => o.id !== store.logo_image_id);
+        if (orphans.length > 0) {
+          db.transaction(() => {
+            for (const o of orphans) {
+              m.deleteImageRow.run(o.id);
+            }
+          })();
+          for (const o of orphans) {
+            try {
+              fs.unlinkSync(path.join(IMAGES_DIR, String(store.id), `${o.hash}.${o.ext}`));
+              report.filesUnlinked += 1;
+            } catch (_) { /* الملف معدوم أصلاً */ }
+            report.orphanImagesDeleted += 1;
+          }
+        }
+        const dir = path.join(IMAGES_DIR, String(store.id));
+        try {
+          const known = new Set(
+            hashesOfStore.all(store.id).map(r => `${r.hash}.${r.ext}`));
+          for (const name of fs.readdirSync(dir)) {
+            if (report.strayFilesDeleted >= STRAY_FILES_CAP) {
+              break;
+            }
+            if (!known.has(name)) {
+              try {
+                fs.unlinkSync(path.join(dir, name));
+                report.strayFilesDeleted += 1;
+              } catch (_) { /* أفضل جهد */ }
+            }
+          }
+        } catch (_) { /* لا مجلد لهذا المتجر — تجاهل */ }
+      } catch (e) {
+        report.errors.push(`store ${store.id}: ${e && e.message}`);
+      }
+    }
+
+    /* 4) رموز الاستعادة المنتهية + سجل التدقيق القديم. */
+    report.resetCodesPurged = db.prepare(
+      'DELETE FROM market_reset_codes WHERE created_at < ?',
+    ).run(now - MAINT_RESET_RETENTION_MS).changes;
+    report.auditPurged = db.prepare(
+      'DELETE FROM audit WHERE ts < ?',
+    ).run(now - AUDIT_RETENTION_DAYS * DAY_MS).changes;
+
+    /* 5) تقليص WAL + تحسين خطط الاستعلام — قاعدة رشيقة. */
+    try {
+      db.exec('PRAGMA wal_checkpoint(TRUNCATE);');
+      db.exec('PRAGMA optimize;');
+      report.walCheckpoint = true;
+    } catch (e) {
+      report.errors.push(`pragma: ${e && e.message}`);
+    }
+  } catch (e) {
+    report.errors.push(String((e && e.message) || e));
+  }
+  if (
+    report.productsDeleted > 0 ||
+    report.orphanImagesDeleted > 0 ||
+    report.strayFilesDeleted > 0 ||
+    report.errors.length > 0
+  ) {
+    audit('market_maintenance', {details: report});
+  }
+  lastMaintenanceReport = report;
+  return report;
 }
 
 /* ── الحارس الدوري (كل 10 دقائق) + تنظيف الجلسات المنتهية ──── */
@@ -2391,10 +2525,28 @@ setInterval(() => {
   }
 }, 10 * 60 * 1000).unref();
 
+/* v5.3: التنظيف الاحترافي — بعد ٣٠ ثانية من الإقلاع ثم كل ٦ ساعات. */
+setTimeout(() => {
+  try {
+    maintenanceSweep();
+  } catch (e) {
+    console.error('[sela-market] maintenance error:', e);
+  }
+}, MAINTENANCE_BOOT_DELAY_MS).unref();
+setInterval(() => {
+  try {
+    maintenanceSweep();
+  } catch (e) {
+    console.error('[sela-market] maintenance error:', e);
+  }
+}, MAINTENANCE_INTERVAL_MS).unref();
+
 module.exports = {
   buildStoreRouter,
   buildMarketRouter,
   buildMarketAdminRouter,
   sweepInactiveStores,
+  maintenanceSweep,
+  getLastMaintenanceReport: () => lastMaintenanceReport,
   marketStatements: m,
 };

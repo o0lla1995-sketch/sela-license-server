@@ -1835,6 +1835,28 @@ async function viewMarket() {
     '<div class="card-title hint">اختر «الطلبات» من جدول المتاجر لتظهر هنا</div>' +
     '<div id="marketOrdersBox"><div class="empty">لا طلبات محمّلة</div></div></div>' +
 
+    '<div class="card"><div class="card-title">التنظيف الدوري للخادم</div>' +
+    '<div class="card-title hint">كل ٦ ساعات يحذف الخادم المنتجات المهجورة (> ١٤ يوماً) وصورها اليتيمة وملفات القرص بلا صف وسجل التدقيق القديم — تقرير آخر دورة:</div>' +
+    (stats.maintenance
+      ? '<div class="table-wrap"><table class="tbl"><thead><tr>' +
+        '<th>متى</th><th>منتجات محذوفة</th><th>صور يتيمة</th><th>ملفات بلا صف</th>' +
+        '<th>رموز منتهية</th><th>سجل تدقيق</th><th>WAL</th>' +
+        '</tr></thead><tbody><tr>' +
+        '<td>' + esc(new Date(stats.maintenance.at).toLocaleString('ar')) + '</td>' +
+        '<td>' + esc(String(stats.maintenance.productsDeleted || 0)) + '</td>' +
+        '<td>' + esc(String(stats.maintenance.orphanImagesDeleted || 0)) + ' <small>(' + esc(String(stats.maintenance.filesUnlinked || 0)) + ' ملف)</small></td>' +
+        '<td>' + esc(String(stats.maintenance.strayFilesDeleted || 0)) + '</td>' +
+        '<td>' + esc(String(stats.maintenance.resetCodesPurged || 0)) + '</td>' +
+        '<td>' + esc(String(stats.maintenance.auditPurged || 0)) + '</td>' +
+        '<td>' + (stats.maintenance.walCheckpoint ? '✔ مقلّص' : '—') + '</td>' +
+        '</tr></tbody></table>' +
+        ((stats.maintenance.errors || []).length
+          ? '<div class="empty" style="color:#f87171">تحذيرات: ' + esc(String(stats.maintenance.errors.join(' · ')).slice(0, 300)) + '</div>'
+          : '') +
+        '</div>'
+      : '<div class="empty">لم تكتمل أول دورة بعد — تنتظر ٣٠ ثانية من تشغيل الخادم</div>') +
+    '</div>' +
+
     '<div class="card"><div class="card-title">سجل طلبات المول الحي</div>' +
     '<div class="card-title hint">كل نداء يصله الخادم من تطبيق المستخدمين لحظة بلحظة — ' +
     'من هنا تتحقق بعينك أن طلبات المنتجات تصل فعلاً (الحالة والحجم والزمن وعنوان العميل). ' +
