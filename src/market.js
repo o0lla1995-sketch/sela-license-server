@@ -446,6 +446,14 @@ const m = {
      ORDER BY p.discount_pct DESC, p.updated_at DESC LIMIT ? OFFSET ?`),
   storeProductByIds: db.prepare(
     `SELECT * FROM store_products WHERE store_id = ? AND available = 1 AND id = ?`),
+  /* v5.4: نفس الاستعلام بلا فلتر available — يميز «المنتج غير موجود»
+   * عن «المنتج موجود لكن أُخفي/سُحب من المتجر» عند التحقق من الطلب. */
+  storeProductAnyState: db.prepare(
+    `SELECT * FROM store_products WHERE store_id = ? AND id = ?`),
+  /* v5.4: خصم/إرجاع المخزون ذرياً — MAX(0,…) يمنع السالب مهما تسابق
+   * الطلبان على آخر قطعة (SQLite كاتب واحد يرتب المعاملات). */
+  adjustProductStock: db.prepare(
+    `UPDATE store_products SET stock = MAX(0, stock - ?), updated_at = ? WHERE store_id = ? AND id = ?`),
   crossProducts: db.prepare(
     `SELECT p.id, p.product_ref, p.name, p.category, p.price_minor, p.stock, p.barcode,
             p.sold_by_weight, p.unit_label, p.options, p.discount_pct, p.store_id, s.name AS store_name, s.store_number
@@ -1798,15 +1806,36 @@ function buildMarketRouter() {
     let itemsTotal = 0;
     let itemsDiscount = 0;
     const lines = [];
+    /* v5.4 (الجولة 59): سقف المخزون — طلب التاجر بالنص: «بما أنه
+     * كمية المنتج معروفة وما هو متوفر مثلاً من مقاسات وغيره،
+     * لماذا يستطيع المستخدم طلب أكبر منها؟». التحقق هنا هو الحكم
+     * النهائي (الواجهة تحدّ العدّاد، والخادم يرفض ما بعده) — لا
+     * طلب أكبر من المتاح يعبر مهما كانت نسخة التطبيق. */
     for (const it of items) {
       const product = m.storeProductByIds.get(store.id, Number(it?.productId));
       if (product == null) {
+        /* نميّز: منتج محذوف فعلاً ≠ منتج موجود لكن سُحب/أُخفي. */
+        const shadow = m.storeProductAnyState.get(store.id, Number(it?.productId));
+        if (shadow != null) {
+          return res.status(409).json({ok: false, error: 'PRODUCT_UNAVAILABLE',
+            productId: it?.productId, productName: shadow.name});
+        }
         return res.status(400).json({ok: false, error: 'PRODUCT_NOT_FOUND',
           productId: it?.productId});
       }
       const quantity = Number(it?.quantity);
       if (!Number.isFinite(quantity) || quantity <= 0 || quantity > 100000) {
         return res.status(400).json({ok: false, error: 'BAD_QUANTITY'});
+      }
+      const stockNow = Number(product.stock);
+      if (!Number.isFinite(stockNow) || stockNow <= 0) {
+        return res.status(409).json({ok: false, error: 'INSUFFICIENT_STOCK',
+          productId: product.id, productName: product.name, available: 0});
+      }
+      if (quantity > stockNow + 0.0001) {
+        return res.status(409).json({ok: false, error: 'INSUFFICIENT_STOCK',
+          productId: product.id, productName: product.name,
+          available: Math.round(stockNow * 1000) / 1000});
       }
       // v4.3: لقطة الخيار المختار (مقاس/لون…) — نص عرض فقط ≤120 محرفاً؛
       // الأسعار تبقى من الكتالوج مهما أُرسل. لا يُشترط لإبقاء توافق
@@ -1843,6 +1872,16 @@ function buildMarketRouter() {
               orderId, l.product.id, l.product.product_ref, l.product.name,
               l.unit, l.quantity, l.lineTotal, l.variant,
             );
+            /* v5.4: الخصم داخل معاملة الطلب نفسها — طلبان متسابقان
+             * على آخر قطعة يرتبهما SQLite؛ الثاني يُرفض سلفاً في
+             * التحقق أعلاه أو يُخصم حتى الصفر بلا سالب أبداً.
+             *
+             * سياسة «المصدر الواحد للحقيقة»: الإلغاء/الرفض لا يُرجعان
+             * المخزون فوراً — مزامنة نقطة البيع الدورية (كل بيع أو
+             * ١٥ دقيقة) تدفع مخزونها الحقيقي فيصحّح الخادم نفسه؛
+             * الإرجاع الفوري فوق مزامنة واقعة كان سيرفع المتاح فوق
+             * الحقيقة (بيع فوق المخزون الفعلي). */
+            m.adjustProductStock.run(l.quantity, now, store.id, l.product.id);
           }
           order = m.orderById.get(orderId);
           break;
