@@ -484,6 +484,16 @@ const m = {
        AND s.published = 1 AND k.revoked_at IS NULL
        AND k.plan_expires_at IS NOT NULL AND k.plan_expires_at > ?
      GROUP BY p.category ORDER BY n DESC LIMIT 100`),
+  /* ── v5.6 (الجولة 61): فحص توفر منتج واحد بمعرفه — المفضلة ──
+   * نفس شرط الظهور في المتاجر تماماً (متاح + متجر منشور + مفتاح
+   * فعال) — يستخدمه /products/availability لتنظيف المفضلة فوراً. */
+  productAvailableById: db.prepare(
+    `SELECT p.id AS id FROM store_products p
+     JOIN stores s ON s.id = p.store_id
+     JOIN keys k ON k.id = s.key_id
+     WHERE p.id = ? AND p.available = 1 AND s.published = 1
+       AND k.revoked_at IS NULL
+       AND k.plan_expires_at IS NOT NULL AND k.plan_expires_at > ?`),
 
   /* ── v4.4: متاجر تخدم منطقة محددة (مع رسم توصيلها لها) ──── */
   publishedStoresInRegion: db.prepare(
@@ -1220,11 +1230,16 @@ function buildStoreRouter() {
     const now = auth.now;
     const reasonText = String(reason || '').trim().slice(0, 200) || null;
 
-    /** خريطة الانتقالات المسموحة — قاعدة الحالة الواحدة المصدر. */
+    /** خريطة الانتقالات المسموحة — قاعدة الحالة الواحدة المصدر.
+     * v5.6 (الجولة 61): الإرسال يُقبل من «جديد» مباشرة أيضاً — البائع
+     * الذي يضغط «تجهيز وفاتورة» بلا «قبول» صريح كان يُسجّل الفاتورة
+     * محلياً بينما يرفض الخادم الانتقال (BAD_STATUS مبتلع) فيبقى
+     * المستخدم في المتجر «بانتظار قبول المتجر» إلى الأبد. الإرسال من
+     * «جديد» يعني قبولاً ضمنياً في اللحظة نفسها (accepted_at يُثبت). */
     const ALLOWED = {
       accept:   {from: ['new'],                to: 'accepted'},
       reject:   {from: ['new'],                to: 'rejected'},
-      send:     {from: ['accepted'],           to: 'sent'},
+      send:     {from: ['new', 'accepted'],    to: 'sent'},
       deliver:  {from: ['sent'],               to: 'delivered'},
       cancel:   {from: ['new', 'accepted'],    to: 'cancelled'},
       return:   {from: ['sent', 'delivered'],  to: null}, // حالة خاصة أدناه
@@ -1277,7 +1292,11 @@ function buildStoreRouter() {
       m.updateOrderStatus.run(
         rule.to,
         now,
-        action === 'accept' ? now : null,
+        /* القبول الضمني: الإرسال من «جديد» يُثبت accepted_at أيضاً
+         * حتى تبقى سلسلة الحالة كاملة للمستخدم في المتجر. */
+        action === 'accept' || (action === 'send' && order.status === 'new')
+          ? now
+          : null,
         action === 'send' ? now : null,
         action === 'deliver' ? now : null,
         ['reject', 'cancel'].includes(action) ? now : null,
@@ -1481,6 +1500,31 @@ function buildMarketRouter() {
 
   router.get('/categories', (_req, res) => {
     res.json({ok: true, categories: m.categories.all(Date.now())});
+  });
+
+  /* ── v5.6 (الجولة 61): فحص توفر منتجات بالمعرف — المفضلة ──────
+   * طلب التاجر بالنص: «كما يختفي المنتج عند إلغاء تفعيله وظهوره في
+   * المتجر أن يختفي من قائمة المفضلة لدى المستخدم ولا يبقى محفوظاً».
+   * نداء واحد بكل معرفات المفضلة (≤60) يُعيد المتاح منها فقط —
+   * التطبيق يحذف ما سُحب فور فتح المفضلة: لا مروحة كتالوجات لكل
+   * متجر ولا انتظار ٢٤ ساعة. الإتاحة = نفس شرط الظهور في المتجر. */
+  router.get('/products/availability', (req, res) => {
+    const ids = String(req.query.ids || '')
+      .split(',')
+      .map(x => Number(x.trim()))
+      .filter(n => Number.isInteger(n) && n > 0)
+      .slice(0, 60);
+    if (ids.length === 0) {
+      return res.json({ok: true, available: []});
+    }
+    const now = Date.now();
+    const available = [];
+    for (const id of ids) {
+      if (m.productAvailableById.get(id, now) != null) {
+        available.push(id);
+      }
+    }
+    res.json({ok: true, available});
   });
 
   /* ── v5.5 (الجولة 60): تغذية الرئيسية المجمعة — طلب واحد ──────
