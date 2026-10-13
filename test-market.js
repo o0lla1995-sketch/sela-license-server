@@ -389,6 +389,9 @@ async function main() {
         regionName: 'المركز',
         address: 'شارع الرئيسي، بناية 4',
         note: 'الاتصال قبل الوصول',
+        // v5.2: مفتاح الإيديمبوتنسية — إعادة الإرسال (شبكة قتلت الرد)
+        // يجب أن تعيد نفس الطلب لا نسخة مكررة.
+        clientRequestId: 'test-client-req-0001',
       },
     });
     // 2×3350 + 1.5×400 + 1×5900 + 1200 = 6700+600+5900+1200 = 14400
@@ -401,6 +404,43 @@ async function main() {
       order.data.order.items.some(it =>
         it.variant === 'المقاس: L · اللون: كحلي' && it.product_name === 'تيشيرت قطن'));
     const orderNumber = order.data.order.order_number;
+
+    /* v5.2: إعادة إرسال بنفس المفتاح تعيد نفس الطلب (إيديمبوتنسية) */
+    const replay = await req('POST', '/api/market/orders', {
+      marketToken: mtok2,
+      body: {
+        storeId: 1,
+        items: [{productId: riceId, quantity: 2}],
+        regionName: 'المركز',
+        address: 'شارع الرئيسي، بناية 4',
+        clientRequestId: 'test-client-req-0001',
+      },
+    });
+    ok('order replay with same clientRequestId returns original',
+      replay.status === 200 && replay.data.order.order_number === orderNumber);
+    const ordersAfterReplay = await req('GET', '/api/market/orders', {marketToken: mtok2});
+    ok('order replay created no duplicate',
+      ordersAfterReplay.data.orders.filter(o => o.order_number === orderNumber).length === 1);
+
+    /* v5.2: ضغط gzip — رد كبير مع Accept-Encoding: gzip يصل مضغوطاً.
+     * (undici يفك الضغط تلقائياً فيخفي الترويسة — نفحص بموديول http
+     * الخام لرؤية الترويسات كما هي على السلك.) */
+    const gzipProbe = await new Promise((resolve) => {
+      const http = require('http');
+      const r = http.request(
+        {host: '127.0.0.1', port: PORT, path: '/api/market/products?per=12',
+         headers: {'Accept-Encoding': 'gzip'}},
+        (resp) => {
+          const chunks = [];
+          resp.on('data', c => chunks.push(c));
+          resp.on('end', () =>
+            resolve({encoding: resp.headers['content-encoding'],
+                      bytes: Buffer.concat(chunks).length}));
+        });
+      r.on('error', () => resolve({encoding: null, bytes: 0}));
+      r.end();
+    });
+    ok('big api responses are gzipped', gzipProbe.encoding === 'gzip');
 
     /* ── 7) POS: استطلاع + قبول + إرسال + تسليم ──────────── */
     const poll = await req('POST', '/api/v1/store/orders/poll',

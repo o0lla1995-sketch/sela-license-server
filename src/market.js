@@ -288,6 +288,15 @@ fs.mkdirSync(IMAGES_DIR, {recursive: true});
   if (!o.includes('items_discount_minor')) {
     db.exec('ALTER TABLE market_orders ADD COLUMN items_discount_minor INTEGER NOT NULL DEFAULT 0');
   }
+  /* v5.2: إيديمبوتنسية إنشاء الطلب — clientRequestId من التطبيق.
+   * شبكة الجوال تقتل رد الطلب بعد إنشائه على الخادم؛ إعادة الإرسال
+   * كانت تنشئ طلباً مكرراً. الآن: نفس المفتاح يعيد الطلب الأصلي. */
+  if (!o.includes('client_request_id')) {
+    db.exec("ALTER TABLE market_orders ADD COLUMN client_request_id TEXT");
+  }
+  db.exec(
+    'CREATE INDEX IF NOT EXISTS idx_orders_user_client_request ' +
+    'ON market_orders(user_id, client_request_id)');
 })();
 
 /* ── عبارات معدّة مسبقاً (نفس انضباط db.js: تنشأ مرة واحدة) ───── */
@@ -349,9 +358,12 @@ const m = {
   insertOrder: db.prepare(
     `INSERT INTO market_orders
        (order_number, store_id, user_id, status, region_name, address, note,
-        delivery_fee_minor, items_total_minor, items_discount_minor, total_minor, created_at, updated_at)
-     VALUES (?, ?, ?, 'new', ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+        delivery_fee_minor, items_total_minor, items_discount_minor, total_minor, created_at, updated_at, client_request_id)
+     VALUES (?, ?, ?, 'new', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
   orderById: db.prepare('SELECT * FROM market_orders WHERE id = ?'),
+  /* v5.2: طلب سابق لنفس المستخدم بنفس مفتاح الإيديمبوتنسية. */
+  orderByClientRequestId: db.prepare(
+    `SELECT * FROM market_orders WHERE user_id = ? AND client_request_id = ? ORDER BY id DESC LIMIT 1`),
   orderByNumber: db.prepare('SELECT * FROM market_orders WHERE order_number = ?'),
   ordersForStoreSince: db.prepare(
     `SELECT * FROM market_orders WHERE store_id = ? AND updated_at > ? ORDER BY updated_at ASC LIMIT 500`),
@@ -1289,13 +1301,13 @@ function buildMarketRouter() {
 
   const TOKEN_HEADER = 'x-market-token';
 
-  /* v4.4→v4.7: منع أي وسيط شبكة من «تحويل» الردود (ضغط gzip عبر بوابة
-   * النشر أو بروكسيات مزودي الجوال على HTTP الصريح) + منع التخزين
-   * وإعادة التحقق نهائياً (no-store) — مع ETag معطّل على مستوى
-   * التطبيق لا يمكن أن يولّد هذا المسار 304 بعد اليوم.
-   * التطبيق يطلب identity أيضاً — هذا الحزام الاحتياطي الثاني. */
+  /* v4.4→v5.2: منع التخزين وإعادة التحقق نهائياً (no-store) مع
+   * إبطال ETag على مستوى التطبيق لا يمكن أن يولّد هذا المسار 304.
+   * حُذف no-transform نهائياً (v5.2): كان يحظر على أي وسيط ضغط
+   * الردود — بينما ردودنا الكبيرة (كتالوج/طلبات) تحتاج gzip لتعبر
+   * شبكات الجوال (انظر وسيط الضغط في server.js). */
   router.use((_req, res, next) => {
-    res.setHeader('Cache-Control', 'no-store, no-transform');
+    res.setHeader('Cache-Control', 'no-store');
     next();
   });
 
@@ -1748,6 +1760,25 @@ function buildMarketRouter() {
     const user = currentUser(req);
     if (!user) return res.status(401).json({ok: false, error: 'AUTH_REQUIRED'});
     const {storeId, items, regionName, address, note} = req.body || {};
+
+    /* v5.2: مفتاح الإيديمبوتنسية — نفس المحاولة المعادة (شبكة قتلت
+     * الرد) تعيد الطلب الأصلي بدل إنشاء مكرر. التطبيق يولّد مفتاحاً
+     * فريداً لكل ضغطة «إرسال الطلب». */
+    const clientRequestId =
+      typeof (req.body || {}).clientRequestId === 'string'
+        ? (req.body || {}).clientRequestId.trim().slice(0, 64)
+        : '';
+    if (clientRequestId.length >= 8) {
+      const existing = m.orderByClientRequestId.get(user.id, clientRequestId);
+      if (existing != null) {
+        // إعادة تشغيل آمنة — نفس الطلب بأسطره، بلا إنشاء جديد.
+        return res.json({
+          ok: true,
+          order: {...existing, items: m.orderItems.all(existing.id)},
+        });
+      }
+    }
+
     const store = storePublic(Number(storeId));
     if (!store) return res.status(404).json({ok: false, error: 'STORE_NOT_FOUND'});
     if (!Array.isArray(items) || items.length === 0 || items.length > 100) {
@@ -1804,6 +1835,7 @@ function buildMarketRouter() {
             String(address || '').trim().slice(0, 200) || null,
             String(note || '').trim().slice(0, 300) || null,
             deliveryFee, itemsTotal, itemsDiscount, total, now, now,
+            clientRequestId.length >= 8 ? clientRequestId : null,
           );
           const orderId = Number(info.lastInsertRowid);
           for (const l of lines) {

@@ -26,6 +26,7 @@ const express = require('express');
 const path = require('path');
 const crypto = require('crypto');
 const fs = require('fs');
+const zlib = require('zlib');
 const {buildRouter} = require('./routes');
 const {buildAdminRouter} = require('./admin');
 const {
@@ -66,6 +67,49 @@ app.set('etag', false);
  * (مخزون/أسعار/طلبات) وأحجامها صغيرة — لا معنى لكاشها أصلاً. */
 app.use('/api', (_req, res, next) => {
   res.setHeader('Cache-Control', 'no-store');
+  next();
+});
+
+/* ══ v5.2: ضغط gzip لكل ردود /api — إصلاح فشل إرسال الطلبات ════
+ * ════════════════════════════════════════════════════════════
+ * القياسات الميدانية للتطبيق (الموثقة في client.ts): على شبكات
+ * الجوال في غزة كل رد أصغر من ~450 بايت يصل سليماً وكل رد أكبر
+ * من ~1KB يُقتل في منتصف الطريق (إطار TCP واحد يعبر، المتعدد
+ * يُسقط). رد POST /orders الكامل (طلب + أسطر + متجر) كان 1–2KB
+ * غير مضغوط: الخادم ينشئ الطلب ثم يموت رده في الطريق ⇒ التطبيق
+ * يعلن «تعذر إرسال الطلب» والطلب موجود فعلاً على الخادم.
+ * الحل: ضغط gzip عند مستوى التطبيق (بلا تبعيات جديدة — zlib
+ * مدمج) لكل رد JSON ≥ 350 بايت عندما يقبل العميل gzip. OKHttp
+ * (طبقة fetch في أندرويد) يرسل Accept-Encoding: gzip ويفك الضغط
+ * بشفافية — لا تغيير مطلوب في التطبيق. ردود الطلبات تنكمش إلى
+ * ~400–600 بايت: فئة «إطار واحد يعبر» المثبتة ميدانياً. */
+app.use('/api', (req, res, next) => {
+  const accept = String(req.headers['accept-encoding'] || '');
+  if (!accept.toLowerCase().includes('gzip')) {
+    return next();
+  }
+  const originalJson = res.json.bind(res);
+  res.json = function gzipJson(obj) {
+    let body;
+    try {
+      body = Buffer.from(JSON.stringify(obj), 'utf8');
+    } catch (_) {
+      return originalJson(obj);
+    }
+    if (body.length < 350) {
+      return originalJson(obj);
+    }
+    try {
+      const gz = zlib.gzipSync(body, {level: zlib.constants.Z_BEST_SPEED});
+      res.set('Content-Type', 'application/json; charset=utf-8');
+      res.set('Content-Encoding', 'gzip');
+      res.set('Vary', 'Accept-Encoding');
+      res.set('Content-Length', String(gz.length));
+      return res.end(gz);
+    } catch (_) {
+      return originalJson(obj);
+    }
+  };
   next();
 });
 
