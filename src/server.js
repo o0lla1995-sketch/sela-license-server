@@ -173,28 +173,60 @@ app.use((_req, res, next) => {
 });
 
 // ── per-IP rate limiting (sliding window, in-memory) ─────────────
+// v5.5 (الجولة 60): إصلاح «محاولات كثيرة» الذي كسر التصفح والبحث:
+//  1) صور المنتجات (/api/market/img/*) معفاة كلياً — محتوى ثابت
+//     موجَّه بالمحتوى (hash في الاسم) بكاش سنة كاملة؛ إحصاؤها
+//     ضمن حد الـ API كان يستهلك ميزانية المستخدم كاملة بمجرد
+//     فتح صفحة متجر فيها ٢٠ صورة.
+//  2) قراءات المال العامة (GET /api/market/stores|products|
+//     categories|home…) سقفها مستقل أرفع (RATE_LIMIT_MARKET_GET،
+//     افتراضياً 400/دقيقة) — تطبيق مول يتصفح فيه المستخدم عشرات
+//     النداءات في الدقيقة سلوك طبيعي لا إساءة.
+//  3) كل ما تبقى (POST طلبات/دخول/لوحة/تراخيص) يبقى على الحد
+//     الصارم الأصلي 120/دقيقة.
 const RATE_LIMIT = Number(process.env.RATE_LIMIT) || 120; // requests
+const RATE_LIMIT_MARKET_GET = Number(process.env.RATE_LIMIT_MARKET_GET) || 400;
 const RATE_WINDOW_MS = 60 * 1000; // per minute
-const hits = new Map();
+const hits = new Map(); // ip → number[] (سقف الطلبات العامة)
+const hitsMarketGet = new Map(); // ip → number[] (سقف قراءات المال)
 
 setInterval(() => {
   const cutoff = Date.now() - RATE_WINDOW_MS;
-  for (const [ip, arr] of hits) {
-    while (arr.length && arr[0] < cutoff) arr.shift();
-    if (arr.length === 0) hits.delete(ip);
+  for (const map of [hits, hitsMarketGet]) {
+    for (const [ip, arr] of map) {
+      while (arr.length && arr[0] < cutoff) arr.shift();
+      if (arr.length === 0) map.delete(ip);
+    }
   }
 }, 30 * 1000).unref();
 
+function isMarketRead(req) {
+  // ملاحظة: داخل app.use('/api', …) يكون req.path نسبياً (/market/…) —
+  // نستخدم originalUrl للمسار الكامل مهما تغير التركيب.
+  const p = req.originalUrl || req.url || '';
+  return (
+    req.method === 'GET' &&
+    /^\/api\/market\/(stores|products|categories|regions|home|config)\b/.test(p.split('?')[0])
+  );
+}
+
 app.use('/api', (req, res, next) => {
+  // صور المال: معفاة من أي عدّ — ثابتة بكاش سنة، لا تكلفة حسابية.
+  const p = (req.originalUrl || req.url || '').split('?')[0];
+  if (req.method === 'GET' && /^\/api\/market\/img\//.test(p)) {
+    return next();
+  }
   const ip = req.ip || 'unknown';
   const now = Date.now();
-  let arr = hits.get(ip);
+  const map = isMarketRead(req) ? hitsMarketGet : hits;
+  const limit = isMarketRead(req) ? RATE_LIMIT_MARKET_GET : RATE_LIMIT;
+  let arr = map.get(ip);
   if (!arr) {
     arr = [];
-    hits.set(ip, arr);
+    map.set(ip, arr);
   }
   while (arr.length && arr[0] < now - RATE_WINDOW_MS) arr.shift();
-  if (arr.length >= RATE_LIMIT) {
+  if (arr.length >= limit) {
     return res.status(429).json({ok: false, error: 'RATE_LIMITED'});
   }
   arr.push(now);

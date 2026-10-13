@@ -934,11 +934,99 @@ async function main() {
     ok('no etag on api responses (304 chain killed)',
       etagProbe.status === 200 && etagProbe.headers.get('etag') == null);
 
+    /* ══ v5.5 (الجولة 60): إصلاح «محاولات كثيرة» + النداء المجمّع ══ */
+
+    // 1) تغذية الرئيسية المجمعة — طلب واحد يعيد كل شيء.
+    const home = await req('GET', '/api/market/home');
+    ok('home bulk feed returns stores+categories+latest',
+      home.status === 200 && Array.isArray(home.data.stores) &&
+      Array.isArray(home.data.categories) && Array.isArray(home.data.latest));
+    ok('home feed includes published store with products',
+      home.data.stores.some(s => s.id === 1) &&
+      home.data.latest.some(p => p.store_id === 1));
+    const homeRegion = await req('GET', '/api/market/home?region=' + encodeURIComponent('غزة'));
+    ok('home feed with region returns regionStores with fee',
+      homeRegion.status === 200 && Array.isArray(homeRegion.data.regionStores) &&
+      homeRegion.data.regionStores.every(s => Number.isFinite(s.deliveryFeeMinor)));
+
+    // 2) سلوك حدود المعدل يُختبر على خادم مخصص أدناه (الخادم الرئيسي
+    //    يعمل بـ RATE_LIMIT=9999 كي لا تعترض الحدودُ جناح الاختبار).
 
   } finally {
     server.kill('SIGTERM');
     await new Promise(r => setTimeout(r, 300));
     server.kill('SIGKILL');
+  }
+
+  /* ══ v5.5: خادم مخصص لاختبار حدود المعدل الحقيقية ══════════════
+   * RATE_LIMIT=12 (عام) و RATE_LIMIT_MARKET_GET=25 (قراءات المال):
+   *  • 40 صورة متتالية لا تُقفل مطلقاً (الصور معفاة).
+   *  • قراءات المال تعمل بعد استنفاد السقف العام (سلة مستقلة).
+   *  • السقف العام نفسه ما زال يعمل (طلب 13+ على مسار غير معفى = 429).
+   */
+  {
+    const PORT2 = 3997;
+    const BASE2 = `http://127.0.0.1:${PORT2}`;
+    const DATA_DIR2 = fs.mkdtempSync(path.join(os.tmpdir(), 'sela-rl-'));
+    const env2 = {
+      ...env,
+      PORT: String(PORT2),
+      DATA_DIR: DATA_DIR2,
+      RATE_LIMIT: '12',
+      RATE_LIMIT_MARKET_GET: '25',
+    };
+    const server2 = spawn(process.execPath, [path.join(__dirname, 'src', 'server.js')], {
+      env: env2, stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    try {
+      await new Promise((resolve, reject) => {
+        const t = setTimeout(() => reject(new Error('rl server boot timeout')), 15000);
+        const onData = d => {
+          if (String(d).includes('listening on')) { clearTimeout(t); resolve(); }
+        };
+        server2.stdout.on('data', onData);
+        server2.on('exit', code => {
+          clearTimeout(t);
+          reject(new Error('rl server exited early code=' + code));
+        });
+      });
+
+      // السقف العام: 12 نداءً على /api/public/site (غير معفى) ثم 429.
+      let hit429At = -1;
+      for (let i = 1; i <= 20; i++) {
+        const r = await fetch(BASE2 + '/api/public/site');
+        if (r.status === 429) { hit429At = i; break; }
+      }
+      ok('general rate limit enforced after 12 requests', hit429At === 13,
+        `first 429 at request #${hit429At}`);
+
+      // قراءات المال: سلتها مستقلة — تعمل رغم استنفاد السقف العام.
+      const cfg = await fetch(BASE2 + '/api/market/config');
+      ok('market reads use separate bucket (works after general exhausted)',
+        cfg.status === 200);
+
+      // سقف قراءات المال نفسه يعمل: 25 ثم 429 (سبق 1 نداء config = 26th).
+      let market429At = -1;
+      for (let i = 1; i <= 30; i++) {
+        const r = await fetch(BASE2 + '/api/market/categories');
+        if (r.status === 429) { market429At = i; break; }
+      }
+      ok('market bucket enforces its own ceiling (429 after 25)', market429At === 25,
+        `first 429 at market read #${market429At}`);
+
+      // الصور معفاة كلياً: حتى بعد استنفاد كل السلال أعلاه، 40 صورة
+      // (مسار غير موجود كافٍ لإثبات الإعفاء — 429 ≠ 404).
+      let imgExempt = true;
+      for (let i = 0; i < 40; i++) {
+        const r = await fetch(BASE2 + '/api/market/img/1/deadbeefdeadbeef.webp');
+        if (r.status === 429) { imgExempt = false; break; }
+      }
+      ok('images fully exempt from rate limiting (404 not 429)', imgExempt);
+    } finally {
+      server2.kill('SIGTERM');
+      await new Promise(r => setTimeout(r, 300));
+      server2.kill('SIGKILL');
+    }
   }
 
   console.log(`\n${passed} passed, ${failed} failed`);

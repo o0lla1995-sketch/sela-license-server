@@ -1483,6 +1483,67 @@ function buildMarketRouter() {
     res.json({ok: true, categories: m.categories.all(Date.now())});
   });
 
+  /* ── v5.5 (الجولة 60): تغذية الرئيسية المجمعة — طلب واحد ──────
+   * التطبيق كان يرسل 5+ نداءات متوازية لفتح الرئيسية (متاجر +
+   * تصنيفات + أحدث المنتجات + متاجر المنطقة + منتجات متاجر مختارة)
+   * فوقها صور المنتجات — وكلها كانت تدخل معدّل الطلبات فتنفجر
+   * حصة المستخدم خلال ثوانٍ («محاولات كثيرة»). النداء المجمّع يعيد
+   * كل ما تحتاجه الرئيسية في طلب واحد:
+   *   stores   — كل المتاجر المنشورة (كما في /stores بلا region)
+   *   categories — التصنيفات بعدّها
+   *   latest   — أحدث 24 منتجاً عابراً للمتاجر
+   *   regionStores — (اختياري عند ?region=) متاجر تخدم المنطقة
+   *                  مرتبة بأرخص توصيل مع رسم كل متجر
+   */
+  router.get('/home', (req, res) => {
+    const now = Date.now();
+    const ratings = ratingStatsMap();
+
+    const stores = m.publishedStores.all(now).map(s => {
+      const out = {
+        ...s,
+        ...(ratings.get(s.id) ?? {rating: null, ratingCount: 0}),
+      };
+      const logo = storeLogoUrl(s);
+      if (logo != null) out.logo_url = logo;
+      return out;
+    });
+
+    const region = String(req.query.region || '').trim();
+    let regionStores = null;
+    if (region.length > 0) {
+      regionStores = m.publishedStoresInRegion.all(region, now).map(s => {
+        const out = {
+          id: s.id,
+          store_number: s.store_number,
+          name: s.name,
+          description: s.description,
+          category: s.category,
+          region: s.region,
+          phone: s.phone,
+          whatsapp: s.whatsapp,
+          deliveryFeeMinor: s.region_fee_minor,
+          logo_url: storeLogoUrl(s),
+          ...(ratings.get(s.id) ?? {rating: null, ratingCount: 0}),
+        };
+        if (out.logo_url == null) delete out.logo_url;
+        return out;
+      });
+    }
+
+    const latest = m.crossProductsFiltered
+      .all(now, '', '', '', '', 24, 0)
+      .map(r => productJson(r, {cross: true}));
+
+    res.json({
+      ok: true,
+      stores,
+      categories: m.categories.all(now),
+      latest,
+      ...(regionStores != null ? {regionStores} : {}),
+    });
+  });
+
   /* ── تقديم صور المنتجات — موجّهة بالمحتوى ⇒ كاش دائم ────────
    * /api/market/img/<store_id>/<sha256>.<ext> — الرابط نفسه يتغير
    * متى تغيرت الصورة، لذا cache-control: immutable لسنة كاملة. */
