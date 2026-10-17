@@ -944,10 +944,79 @@ async function main() {
     ok('home feed includes published store with products',
       home.data.stores.some(s => s.id === 1) &&
       home.data.latest.some(p => p.store_id === 1));
-    const homeRegion = await req('GET', '/api/market/home?region=' + encodeURIComponent('غزة'));
+    const homeRegion = await req('GET', '/api/market/home?region=' + encodeURIComponent('المركز'));
     ok('home feed with region returns regionStores with fee',
       homeRegion.status === 200 && Array.isArray(homeRegion.data.regionStores) &&
+      homeRegion.data.regionStores.length > 0 &&
       homeRegion.data.regionStores.every(s => Number.isFinite(s.deliveryFeeMinor)));
+
+    /* ── v5.7 (الجولة 69): تغيير مفتاح الاشتراك ───────────────
+     * شكوى التاجر بالنص: «إذا تم فقدان الاتصال بالمتجر مثلاً بتغيير
+     * مفتاح الاشتراك تبقى المنتجات موجودة، وإذا تم إعادة تفعيله يظهر
+     * المتجر في التطبيق وكأنه متجر جديد بمنتجات متكررة وحتى فاقدة
+     * للصور، ويعامل كأنه متجر جديد فيحدث تراكم ومنتجات غير متصلة
+     * بأي متجر». الآن: المفتاح الجديد على نفس الجهاز يستعيد المتجر
+     * الأصلي — نفس storeNumber، بلا صفوف مكررة، وبالصور المحفوظة. */
+    const Database4 = require('better-sqlite3');
+    const db4 = new Database4(path.join(DATA_DIR, 'sela-license.db'));
+    db4.prepare('UPDATE keys SET plan_expires_at = ? WHERE key_plain = ?')
+      .run(Date.now() - 2000, key);
+    db4.close();
+    const expiredAgain = await req('POST', '/api/v1/store/products/sync',
+      {body: {...auth, products: []}});
+    ok('subscription expired again → SUBSCRIPTION_ENDED', expiredAgain.status === 403 &&
+      expiredAgain.data.error === 'SUBSCRIPTION_ENDED');
+    const hiddenAgain = await req('GET', '/api/market/stores');
+    ok('store hidden after expiry', hiddenAgain.data.stores.length === 0);
+
+    const created4 = await req('POST', '/api/admin/keys', {
+      token: 'root-master-token', body: {planDays: 60, count: 1, note: 'مفتاح بديل لنفس المتجر'},
+    });
+    ok('replacement key created', created4.status === 200 && created4.data.keys.length === 1);
+    const key4 = created4.data.keys[0].key;
+    const act4 = await req('POST', '/api/v1/activate',
+      {body: {key: key4, deviceId: dev, deviceLabel: 'pos', appVersion: '48.0.0'}});
+    ok('new key activated on SAME device', act4.status === 200 && act4.data.license);
+    const auth4 = {license: act4.data.license, signature: act4.data.signature, deviceId: dev};
+
+    const reg4 = await req('POST', '/api/v1/store/register', {
+      body: {
+        ...auth4,
+        store: {name: 'سوبر ماركت النور ٢', phone: '0591234567'},
+        deliveryRegions: [{name: 'المركز', feeMinor: 1200}],
+        published: true,
+      },
+    });
+    ok('key change reuses ORIGINAL store (no new store)',
+      reg4.status === 200 && reg4.data.ok &&
+      reg4.data.store.storeNumber === republish.data.store.storeNumber,
+      `got ${reg4.data.store && reg4.data.store.storeNumber}`);
+    const stores4 = await req('GET', '/api/market/stores');
+    ok('exactly one store after key change (no duplicates)',
+      stores4.data.stores.length === 1 &&
+      stores4.data.stores[0].store_number === republish.data.store.storeNumber);
+
+    const syncNewKey = await req('POST', '/api/v1/store/products/sync', {
+      body: {
+        ...auth4,
+        products: [
+          {ref: '101', name: 'أرز أبو كاس 5كغ', category: 'بقالة', priceMinor: 3400, stock: 10, discountPct: 20},
+          {ref: '102', name: 'زيت دوار الشمس 1.5ل', category: 'بقالة', priceMinor: 1800, stock: 9},
+        ],
+      },
+    });
+    ok('catalog synced under new key', syncNewKey.status === 200 && syncNewKey.data.saved === 2);
+    const prodsNewKey = await req('GET', '/api/market/stores/1/products');
+    const riceNewKey = prodsNewKey.data.products.filter(p => p.product_ref === '101');
+    const oilNewKey = prodsNewKey.data.products.find(p => p.product_ref === '102');
+    ok('no duplicated product rows after key change', riceNewKey.length === 1,
+      `found ${riceNewKey.length} rows for ref 101`);
+    ok('product images preserved after key change',
+      oilNewKey != null && Array.isArray(oilNewKey.images) && oilNewKey.images.length === 1,
+      'oil images=' + JSON.stringify(oilNewKey && oilNewKey.images));
+    ok('store keeps its identity (same id/number/ratings)',
+      prodsNewKey.status === 200 && stores4.data.stores[0].id === 1 &&
+      stores4.data.stores[0].rating != null && stores4.data.stores[0].ratingCount >= 1);
 
     // 2) سلوك حدود المعدل يُختبر على خادم مخصص أدناه (الخادم الرئيسي
     //    يعمل بـ RATE_LIMIT=9999 كي لا تعترض الحدودُ جناح الاختبار).

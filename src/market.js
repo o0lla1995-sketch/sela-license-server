@@ -318,6 +318,34 @@ const m = {
   listRegions: db.prepare(
     'SELECT name, fee_minor, enabled, sort_order FROM store_delivery_regions WHERE store_id = ? ORDER BY sort_order ASC'),
 
+  /* ── v5.7 (الجولة 69): استعادة متجر الجهاز بعد تغيير المفتاح ──
+   * ─────────────────────────────────────────────────────────────────
+   * كان الربط الوحيد stores.key_id: تغيير مفتاح الاشتراك (انتهاء
+   * ثم مفتاح جديد) يترك المتجر القديم يتيمياً وينشئ للمفتاح الجديد
+   * متجراً «جديداً» بصفوف منتجات مكررة بلا صور — التراكم الذي
+   * اشتكى منه التاجر. الهوية الصحيحة: المتجر ملك لنقطة البيع
+   * (الجهاز)؛ المفتاح مجرد اشتراك. هذه العبارات تخدم الاستعادة. */
+  storesByDevice: db.prepare(
+    `SELECT s.* FROM stores s
+     JOIN activations a ON a.key_id = s.key_id
+     WHERE a.device_id = ? AND a.unbound_at IS NULL
+     ORDER BY s.updated_at DESC`),
+  ordersCountByStore: db.prepare(
+    'SELECT COUNT(*) AS n FROM market_orders WHERE store_id = ?'),
+  ratingsCountByStore: db.prepare(
+    'SELECT COUNT(*) AS n FROM market_ratings WHERE store_id = ?'),
+  imgLinksCountByStore: db.prepare(
+    `SELECT COUNT(*) AS n FROM store_product_images l
+     JOIN store_products p ON p.id = l.product_id
+     WHERE p.store_id = ?`),
+  availableCountByStore: db.prepare(
+    'SELECT COUNT(*) AS n FROM store_products WHERE store_id = ? AND available = 1'),
+  relinkStore: db.prepare(
+    'UPDATE stores SET key_id = ?, updated_at = ? WHERE id = ?'),
+  hideStore: db.prepare(
+    'UPDATE stores SET published = 0, updated_at = ? WHERE id = ?'),
+  deleteStoreRow: db.prepare('DELETE FROM stores WHERE id = ?'),
+
   upsertProduct: db.prepare(
     `INSERT INTO store_products
        (store_id, product_ref, name, category, price_minor, stock, barcode, sold_by_weight, unit_label, description, options, discount_pct, available, updated_at)
@@ -861,6 +889,164 @@ function sweepInactiveStores() {
  * 1) Merchant API — /api/v1/store/*
  * ════════════════════════════════════════════════════════════════ */
 
+/* ── v5.7 (الجولة 69): استعادة متجر الجهاز بعد تغيير مفتاح الاشتراك ──
+ * ─────────────────────────────────────────────────────────────────
+ * المشكلة الجذرية (شكوى التاجر بالنص): «إذا تم فقدان الاتصال بالمتجر
+ * مثلاً بتغيير مفتاح الاشتراك تبقى المنتجات موجودة، وإذا تم إعادة
+ * تفعيله يظهر المتجر في التطبيق وكأنه متجر جديد بمنتجات متكررة وحتى
+ * فاقدة للصور، ويعامل كأنه متجر جديد فيحدث تراكم ومنتجات غير متصلة
+ * بأي متجر».
+ *
+ * السبب: authenticate كان يبحث عن المتجر بمفتاح الاشتراك وحده
+ * (storeByKey). هوية المتجر الحقيقية هي نقطة البيع (الجهاز) —
+ * المفتاح اشتراك يتبدل، والجهاز يبقى. عند أول نداء تجاري بمفتاح
+ * جديد نستعيد متجر هذا الجهاز من سِجل الربط (activations: كل
+ * المفاتيح التي فُعِّلت على هذا الجهاز قط) ونعيد ربطه بالمفتاح
+ * الحالي بدل إنشاء متجر جديد: نفس store_id وstore_number، نفس
+ * صفوف المنتجات (المزامنة upsert بـ product_ref فلا تكرار)، نفس
+ * الصور والتقييمات وطلبات العملاء.
+ *
+ * شروط الاستعادة (أمان المتاجر العاملة):
+ *  • المتاجر المرشحة: ملك لمفاتيح سبق تفعيلها على هذا الجهاز
+ *    (binding سارية unbound_at IS NULL) ومفتاحها غير نشط الآن
+ *    (منتهٍ/موقوف) — أي متجر حي بمفتاح نشط لا يُمس إطلاقاً.
+ *  • الترشيح الأفضل: الأكثر اكتمالاً (صور منتجات ← تقييمات ←
+ *    منتجات متاحة ← الأحدث تحديثاً) — الأصل غالباً يتفوق على
+ *    النسخة المكررة الفاقدة للصور.
+ *  • إن كان للمفتاح الحالي متجر أسوأ (نسخة أُنشئت قبل هذا
+ *    الإصلاح): يُحذف إن لم تكن له طلبات (يحرر المفتاح أولاً ثم
+ *    إعادة الربط داخل معاملة واحدة)، وإن كانت له طلبات فيبقى
+ *    (تاريخ عملاء لا يُمس) ونُشفى نقصه بنسخ روابط صور الأصل
+ *    إلى منتجاته المطابقة بـ product_ref.
+ *  • المتاجر التيمة الأخرى بلا طلبات تُحذف (لا تراكم بعد اليوم)؛
+ *    التي لها طلبات تبقى مخفية إلى الأبد — مرئية للإدارة فقط. */
+function storeCompletenessScore(row) {
+  return {
+    images: m.imgLinksCountByStore.get(row.id).n,
+    ratings: m.ratingsCountByStore.get(row.id).n,
+    available: m.availableCountByStore.get(row.id).n,
+    updatedAt: row.updated_at,
+  };
+}
+
+function scoreBetter(a, b) {
+  if (a.images !== b.images) return a.images > b.images;
+  if (a.ratings !== b.ratings) return a.ratings > b.ratings;
+  if (a.available !== b.available) return a.available > b.available;
+  return a.updatedAt > b.updatedAt;
+}
+
+/** روابط صور متجر تُنسخ إلى منتجات متجر آخر المطابقة بـ product_ref. */
+function copyImageLinksAcrossStores(fromStoreId, toStoreId) {
+  return db.prepare(
+    `INSERT OR IGNORE INTO store_product_images (product_id, image_id, sort_order)
+     SELECT tp.id, l.image_id, l.sort_order
+     FROM store_product_images l
+     JOIN store_products fp ON fp.id = l.product_id
+     JOIN store_products tp ON tp.store_id = ? AND tp.product_ref = fp.product_ref
+     WHERE fp.store_id = ?`,
+  ).run(toStoreId, fromStoreId).changes;
+}
+
+function recoverDeviceStore(keyRow, deviceId, current, now) {
+  /* المرشحون: متاجر هذا الجهاز تحت مفاتيح أخرى «غير نشطة» —
+   * المتجر الحي بمفتاح نشط (اشتراك واقف لمتجر آخر) لا يُلمس. */
+  const siblings = m.storesByDevice.all(deviceId)
+    .filter(s => s.key_id !== keyRow.id)
+    .filter(s => {
+      const k = stmt.keyById.get(s.key_id);
+      return k != null && !keyActive(k, now);
+    });
+  if (siblings.length === 0) {
+    return {store: current ?? null, recovered: null};
+  }
+  let best = siblings[0];
+  let bestScore = storeCompletenessScore(best);
+  for (const s of siblings.slice(1)) {
+    const sc = storeCompletenessScore(s);
+    if (scoreBetter(sc, bestScore)) {
+      best = s;
+      bestScore = sc;
+    }
+  }
+
+  if (current == null) {
+    /* المفتاح الحالي بلا متجر → إعادة ربط أفضل متاجر الجهاز به.
+     * المفتاح خالٍ بالضرورة (وصلنا هنا بعد storeByKey=null) فلا
+     * تعارض UNIQUE. بقية الإخوة: حذف بلا طلبات، إخفاء بطلبات. */
+    m.relinkStore.run(keyRow.id, now, best.id);
+    let removed = 0;
+    for (const s of siblings) {
+      if (s.id === best.id) continue;
+      if (m.ordersCountByStore.get(s.id).n === 0) {
+        m.deleteStoreRow.run(s.id);
+        removed += 1;
+      } else {
+        m.hideStore.run(now, s.id);
+      }
+    }
+    audit('store_recovered', {
+      keyId: keyRow.id,
+      deviceId,
+      details: {
+        storeId: best.id,
+        storeNumber: best.store_number,
+        fromKey: best.key_id,
+        siblingsRemoved: removed,
+      },
+    });
+    return {store: m.storeById.get(best.id), recovered: best};
+  }
+
+  /* للمفتاح الحالي متجر أُنشئ قبل هذا الإصلاح (النسخة المكررة) —
+   * إن كان الأصل أكمل نُصلح الحال بأقل ضرر ممكن. */
+  const currentScore = storeCompletenessScore(current);
+  if (!scoreBetter(bestScore, currentScore)) {
+    return {store: current, recovered: null};
+  }
+  if (m.ordersCountByStore.get(current.id).n === 0) {
+    /* نسخة بلا طلبات: تُحذف (تحرر المفتاح) ثم إعادة ربط الأصل —
+     * كل ذلك داخل معاملة واحدة. */
+    db.transaction(() => {
+      m.deleteStoreRow.run(current.id);
+      m.relinkStore.run(keyRow.id, now, best.id);
+    })();
+    let removed = 0;
+    for (const s of siblings) {
+      if (s.id === best.id) continue;
+      if (m.ordersCountByStore.get(s.id).n === 0) {
+        m.deleteStoreRow.run(s.id);
+        removed += 1;
+      } else {
+        m.hideStore.run(now, s.id);
+      }
+    }
+    audit('store_recovered', {
+      keyId: keyRow.id,
+      deviceId,
+      details: {
+        storeId: best.id,
+        storeNumber: best.store_number,
+        fromKey: best.key_id,
+        replacedEmptyStore: current.id,
+        siblingsRemoved: removed,
+      },
+    });
+    return {store: m.storeById.get(best.id), recovered: best};
+  }
+  /* النسخة الحالية لها طلبات (تاريخ لا يُحذف) — نُشفى فاقد
+   * الصور فقط: نسب روابط صور الأصل إلى منتجاتها المطابقة. */
+  const healed = copyImageLinksAcrossStores(best.id, current.id);
+  if (healed > 0) {
+    audit('store_images_healed', {
+      keyId: keyRow.id,
+      deviceId,
+      details: {storeId: current.id, fromStoreId: best.id, linksCopied: healed},
+    });
+  }
+  return {store: current, recovered: null};
+}
+
 function buildStoreRouter() {
   const router = express.Router();
 
@@ -893,7 +1079,16 @@ function buildStoreRouter() {
       res.status(403).json({ok: false, error: 'SUBSCRIPTION_ENDED'});
       return null;
     }
-    const store = m.storeByKey.get(payload.keyId);
+    let store = m.storeByKey.get(payload.keyId);
+    /* v5.7: مفتاح بلا متجر لكن الجهاز له متجر قديم (تغيير
+     * اشتراك) → استعادته بدل إنشاء متجر جديد مكرر. وإن كان
+     * للمفتاح متجر أسوأ (ضرر ما قبل الإصلاح) نصلحه هنا أيضاً. */
+    if (store == null || m.imgLinksCountByStore.get(store.id).n === 0) {
+      const out = recoverDeviceStore(keyRow, deviceId, store, now);
+      if (out.store != null) {
+        store = out.store;
+      }
+    }
     if (store != null) {
       m.touchStore.run(now, store.id);
     }
