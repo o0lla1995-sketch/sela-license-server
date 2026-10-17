@@ -346,6 +346,19 @@ const m = {
     'UPDATE stores SET published = 0, updated_at = ? WHERE id = ?'),
   deleteStoreRow: db.prepare('DELETE FROM stores WHERE id = ?'),
 
+  /* ── v5.8 (الجولة 70): الحل المزدوج — استعادة برقم المتجر ──
+   * ─────────────────────────────────────────────────────────────────
+   * طلب التاجر: «تأكد من أن الحل مزدوج في مشكلة ازدواج المتجر عند
+   * تغيير المفتاح حيث يعمل من خلال مفتاح الاشتراك ورقم المتجر».
+   * مسار v5.7 يربط عبر سجل تفعيلات الجهاز (كل مفاتيح هذا الجهاز)
+   * — يغطي تغيير المفتاح على نفس نقطة البيع. هذا المسار الثاني
+   * يربط عبر رقم المتجر الذي يحفظه POS محلياً ويرسله عند register
+   * — يغطي كذلك تغيير الجهاز/إعادة التثبيت حيث لا سجل تفعيلات
+   * للجهاز الجديد. الأمان مزدوج أيضاً: المتجر المرشح لا يُمس أبداً
+   * إن كان مفتاحه نشطاً (متجر حي بمفتاح واقف لا يُختطف)، ولا يُستبدل
+   * المتجر الحالي السليم إلا إن كان المرشح أكمل منه (صور أولاً). */
+  storeByNumber: db.prepare('SELECT * FROM stores WHERE store_number = ?'),
+
   upsertProduct: db.prepare(
     `INSERT INTO store_products
        (store_id, product_ref, name, category, price_minor, stock, barcode, sold_by_weight, unit_label, description, options, discount_pct, available, updated_at)
@@ -1047,6 +1060,90 @@ function recoverDeviceStore(keyRow, deviceId, current, now) {
   return {store: current, recovered: null};
 }
 
+/** v5.8 (الجولة 70): المسار الثاني للحل المزدوج — استعادة برقم
+ * المتجر الذي يرسله POS (رقم دائم لا يتغير مع تغيير الاشتراك أو
+ * الجهاز). يشمل حالات لا يغطيها مسار تفعيلات الجهاز: نقطة بيع
+ * جديدة/معاد تثبيتها بلا سجل تفعيلات سابق.
+ *
+ * شروط الأمان (نفس انضباط مسار الجهاز):
+ *  • المرشح (برقم المتجر) لا يُمس أبداً إن كان مفتاحه نشطاً —
+ *    متجر حي بمفتاح واقف لا يُختطف برقمه.
+ *  • المتجر الحالي السليم لا يُستبدل إلا إن كان المرشح أكمل منه
+ *    (صور ← تقييمات ← متاح ← الأحدث) — النسخة الفاقدة للصور
+ *    التي أُنشئت قبل الإصلاح تُشفى أو تُستبدل.
+ *  • key_id في stores فريد (UNIQUE) — تحرير المفتاح بحذف النسخة
+ *    الفارغة يسبق إعادة الربط دائماً داخل معاملة واحدة. */
+function recoverStoreByNumber(keyRow, storeNumber, current, now) {
+  const candidate = m.storeByNumber.get(storeNumber);
+  if (candidate == null) {
+    return {store: current ?? null, recovered: null};
+  }
+  /* المرشح هو المتجر الحالي نفسه — لا شيء للفعله (حارس خامل). */
+  if (current != null && candidate.id === current.id) {
+    return {store: current, recovered: null};
+  }
+  /* المرشح ملك لهذا المفتاح أصلاً (موقعه الدفاعي — لا يحدث عبر
+   * storeByKey لكن الأمان أولاً). */
+  if (candidate.key_id === keyRow.id) {
+    return {store: candidate, recovered: null};
+  }
+  /* متجر حي بمفتاح نشط — مصان لا يُلمس مهما كان الرقم. */
+  const candKey = stmt.keyById.get(candidate.key_id);
+  if (candKey != null && keyActive(candKey, now)) {
+    return {store: current ?? null, recovered: null};
+  }
+
+  if (current == null) {
+    /* المفتاح بلا متجر وPOS يقول رقمه القديم → إعادة ربط الأصل
+     * برقمه الكامل (الصور/التقييمات/الطلبات كلها باقية). */
+    m.relinkStore.run(keyRow.id, now, candidate.id);
+    audit('store_recovered_by_number', {
+      keyId: keyRow.id,
+      details: {
+        storeId: candidate.id,
+        storeNumber: candidate.store_number,
+        fromKey: candidate.key_id,
+      },
+    });
+    return {store: m.storeById.get(candidate.id), recovered: candidate};
+  }
+
+  /* للمفتاح متجر قائم (نسخة أُنشئت قبل هذا الإصلاح غالباً) — لا
+   * يُستبدل إلا إن كان الأصل المرقّم أكمل منه. */
+  const candScore = storeCompletenessScore(candidate);
+  const curScore = storeCompletenessScore(current);
+  if (!scoreBetter(candScore, curScore)) {
+    return {store: current, recovered: null};
+  }
+  if (m.ordersCountByStore.get(current.id).n === 0) {
+    /* النسخة الحالية فارغة بلا طلبات: تُحذف (تحرر المفتاح UNIQUE)
+     * ثم إعادة ربط الأصل — معاملة واحدة ذرّية. */
+    db.transaction(() => {
+      m.deleteStoreRow.run(current.id);
+      m.relinkStore.run(keyRow.id, now, candidate.id);
+    })();
+    audit('store_recovered_by_number', {
+      keyId: keyRow.id,
+      details: {
+        storeId: candidate.id,
+        storeNumber: candidate.store_number,
+        fromKey: candidate.key_id,
+        replacedEmptyStore: current.id,
+      },
+    });
+    return {store: m.storeById.get(candidate.id), recovered: candidate};
+  }
+  /* النسخة الحالية لها طلبات (تاريخ لا يُحذف) — شفاء الصور فقط. */
+  const healed = copyImageLinksAcrossStores(candidate.id, current.id);
+  if (healed > 0) {
+    audit('store_images_healed_by_number', {
+      keyId: keyRow.id,
+      details: {storeId: current.id, fromStoreId: candidate.id, linksCopied: healed},
+    });
+  }
+  return {store: current, recovered: null};
+}
+
 function buildStoreRouter() {
   const router = express.Router();
 
@@ -1105,12 +1202,31 @@ function buildStoreRouter() {
 
   /* ── register: إنشاء/تحديث ملف المتجر + مناطق التوصيل ────── */
   router.post('/register', (req, res) => {
-    const auth = authenticate(req.body, res);
+    let auth = authenticate(req.body, res);
     if (!auth) return;
     const {store, deliveryRegions, published} = req.body || {};
     if (store == null || typeof store !== 'object' ||
         typeof store.name !== 'string' || store.name.trim().length < 2) {
       return res.status(400).json({ok: false, error: 'BAD_STORE'});
+    }
+    /* v5.8 (الجولة 70): الحل المزدوج — المسار الثاني برقم المتجر.
+     * POS يحفظ رقم متجره الدائم ويرسله مع كل register؛ إذا كان
+     * المفتاح الحالي بلا متجر (أو بمتجر فارغ أُنشئ قبل الإصلاح)
+     * والموجود برقم المتجر ملك لمفتاح غير نشط → إعادة ربط الأصل
+     * بدل إنشاء مكرر. يغطي تغيير الجهاز/إعادة التثبيت حيث لا
+     * سجل تفعيلات للجهاز الجديد (مسار v5.7 يغطي نفس الجهاز). */
+    const storeNumberHint =
+      typeof store.storeNumber === 'string'
+      ? store.storeNumber.trim().toUpperCase().slice(0, 16)
+      : null;
+    if (
+      storeNumberHint != null &&
+      (auth.store == null || m.imgLinksCountByStore.get(auth.store.id).n === 0)
+    ) {
+      const out = recoverStoreByNumber(auth.keyRow, storeNumberHint, auth.store, auth.now);
+      if (out.store != null) {
+        auth = {...auth, store: out.store};
+      }
     }
     const name = store.name.trim().slice(0, 80);
     const description = String(store.description || '').trim().slice(0, 400) || null;

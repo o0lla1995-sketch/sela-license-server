@@ -1018,6 +1018,101 @@ async function main() {
       prodsNewKey.status === 200 && stores4.data.stores[0].id === 1 &&
       stores4.data.stores[0].rating != null && stores4.data.stores[0].ratingCount >= 1);
 
+    /* ── v5.8 (الجولة 70): الحل المزدوج — الاستعادة برقم المتجر ──
+     * طلب التاجر بالنص: «تأكد من أن الحل مزدوج في مشكلة ازدواج
+     * المتجر عند تغيير المفتاح حيث يعمل من خلال مفتاح الاشتراك
+     * ورقم المتجر». مسار v5.7 أعلاه يغطي المفتاح الجديد على نفس
+     * الجهاز (سجل التفعيلات). هذا المسار يغطي الحالة الثانية:
+     * جهاز جديد كلياً (نقطة بيع بديلة/إعادة تثبيت) بلا أي سجل
+     * تفعيلات — POS يرسل رقم متجره الدائم المحفوظ فيُستعاد الأصل. */
+    const savedStoreNumber = reg4.data.store.storeNumber;
+    const Database5 = require('better-sqlite3');
+    const db5 = new Database5(path.join(DATA_DIR, 'sela-license.db'));
+    db5.prepare('UPDATE keys SET plan_expires_at = ? WHERE key_plain = ?')
+      .run(Date.now() - 2000, key4);
+    db5.close();
+    const expired5 = await req('POST', '/api/v1/store/products/sync',
+      {body: {...auth4, products: []}});
+    ok('replacement key expired too → SUBSCRIPTION_ENDED',
+      expired5.status === 403 && expired5.data.error === 'SUBSCRIPTION_ENDED');
+
+    // مفتاح ثالث على جهاز جديد كلياً — لا سجل تفعيلات إطلاقاً.
+    const created5 = await req('POST', '/api/admin/keys', {
+      token: 'root-master-token', body: {planDays: 60, count: 1, note: 'مفتاح على جهاز جديد'},
+    });
+    ok('key for NEW device created', created5.status === 200 && created5.data.keys.length === 1);
+    const key5 = created5.data.keys[0].key;
+    const freshDev = 'fresh-pos-device-999';
+    const act5 = await req('POST', '/api/v1/activate',
+      {body: {key: key5, deviceId: freshDev, deviceLabel: 'pos2', appVersion: '62.0.0'}});
+    ok('new key activated on BRAND-NEW device', act5.status === 200 && act5.data.license);
+    const auth5 = {license: act5.data.license, signature: act5.data.signature, deviceId: freshDev};
+
+    // register يرسل رقم المتجر المحفوظ (كما يفعل POS منذ v58).
+    const reg5 = await req('POST', '/api/v1/store/register', {
+      body: {
+        ...auth5,
+        store: {name: 'سوبر ماركت النور ٣', phone: '0591234567', storeNumber: savedStoreNumber},
+        deliveryRegions: [{name: 'المركز', feeMinor: 1200}],
+        published: true,
+      },
+    });
+    ok('NEW device + number hint → ORIGINAL store recovered (no duplicate)',
+      reg5.status === 200 && reg5.data.ok &&
+      reg5.data.store.storeNumber === savedStoreNumber,
+      `got ${reg5.data.store && reg5.data.store.storeNumber}`);
+    const stores5 = await req('GET', '/api/market/stores');
+    ok('still exactly ONE store after new-device key change',
+      stores5.data.stores.length === 1 &&
+      stores5.data.stores[0].store_number === savedStoreNumber);
+
+    // الصور والتقييمات باقية على المتجر المستعاد برقمه.
+    const syncNewDev = await req('POST', '/api/v1/store/products/sync', {
+      body: {
+        ...auth5,
+        products: [
+          {ref: '101', name: 'أرز أبو كاس 5كغ', category: 'بقالة', priceMinor: 3400, stock: 10, discountPct: 20},
+          {ref: '102', name: 'زيت دوار الشمس 1.5ل', category: 'بقالة', priceMinor: 1800, stock: 9},
+        ],
+      },
+    });
+    ok('catalog synced under new device key', syncNewDev.status === 200 && syncNewDev.data.saved === 2);
+    const prodsNewDev = await req('GET', '/api/market/stores/1/products');
+    const riceNewDev = prodsNewDev.data.products.filter(p => p.product_ref === '101');
+    ok('no duplicated rows after number-recovery', riceNewDev.length === 1,
+      `found ${riceNewDev.length} rows for ref 101`);
+    const oilNewDev = prodsNewDev.data.products.find(p => p.product_ref === '102');
+    ok('images preserved after number-recovery',
+      oilNewDev != null && Array.isArray(oilNewDev.images) && oilNewDev.images.length === 1,
+      'oil images=' + JSON.stringify(oilNewDev && oilNewDev.images));
+
+    /* حارس الأمان: متجر حي بمفتاح نشط لا يُختطف برقمه — جهاز رابع
+     * بمفتاح رابع يحاول التسجيل بنفس الرقم لا ينال المتجر الحي
+     * بل يُنشأ له متجر جديد برقم مختلف تماماً. */
+    const created6 = await req('POST', '/api/admin/keys', {
+      token: 'root-master-token', body: {planDays: 30, count: 1, note: 'اختبار خطف الرقم'},
+    });
+    const key6 = created6.data.keys[0].key;
+    const act6 = await req('POST', '/api/v1/activate',
+      {body: {key: key6, deviceId: 'attacker-device-666', deviceLabel: 'x', appVersion: '62.0.0'}});
+    const auth6 = {license: act6.data.license, signature: act6.data.signature, deviceId: 'attacker-device-666'};
+    const hijack = await req('POST', '/api/v1/store/register', {
+      body: {
+        ...auth6,
+        store: {name: 'متجر مزعج', phone: '05', storeNumber: savedStoreNumber},
+        deliveryRegions: [],
+        published: true,
+      },
+    });
+    ok('LIVE store with ACTIVE key can NOT be hijacked by its number',
+      hijack.status === 200 && hijack.data.ok &&
+      hijack.data.store.storeNumber !== savedStoreNumber,
+      `got ${hijack.data.store && hijack.data.store.storeNumber}`);
+    const stores6 = await req('GET', '/api/market/stores');
+    ok('hijacker got his own NEW store (two stores, numbers differ)',
+      stores6.data.stores.length === 2 &&
+      stores6.data.stores.filter(s => s.store_number === savedStoreNumber).length === 1);
+
     // 2) سلوك حدود المعدل يُختبر على خادم مخصص أدناه (الخادم الرئيسي
     //    يعمل بـ RATE_LIMIT=9999 كي لا تعترض الحدودُ جناح الاختبار).
 
