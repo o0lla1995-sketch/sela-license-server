@@ -43,6 +43,16 @@ function activationUrlPayload() {
   return url.length > 0 ? {activationUrl: url} : {};
 }
 
+/** v6.0 (الجولة 66 #4) — التحديث الإجباري: يُرفق دائماً مع كل رد
+ *  (تفعيل/نبضة/إعدادات) حتى يراه الجهاز في أول اتصال له. الحد
+ *  الأدنى الفارغ يعني «لا إجبار» ويُفرّغ الإجبار على الأجهزة. */
+function updatePayload() {
+  return {
+    minAppVersion: String(getSetting('min_app_version', '') || '').trim(),
+    updateUrl: String(getSetting('update_url', '') || '').trim(),
+  };
+}
+
 function buildRouter() {
   const router = express.Router();
 
@@ -72,6 +82,7 @@ function buildRouter() {
       ok: true,
       contact: contactPayload(),
       ...activationUrlPayload(),
+      ...updatePayload(),
       currency,
       plans: [
         {id: 'trial', days: 7, label: 'تجريبي', price: Number(getSetting('price_trial', '0'))},
@@ -202,6 +213,7 @@ function buildRouter() {
       planStartedAt: keyWithPlan.first_activated_at ?? binding.activated_at,
       contact: contactPayload(),
       ...activationUrlPayload(),
+      ...updatePayload(),
     });
   });
 
@@ -237,6 +249,7 @@ function buildRouter() {
         expiresAt: payload.expiresAt,
         contact: contactPayload(),
         ...activationUrlPayload(),
+        ...updatePayload(),
       });
     }
 
@@ -256,6 +269,7 @@ function buildRouter() {
         expiresAt: binding.expires_at,
         contact: contactPayload(),
         ...activationUrlPayload(),
+        ...updatePayload(),
       });
     }
 
@@ -268,6 +282,7 @@ function buildRouter() {
         expiresAt: binding.expires_at,
         contact: contactPayload(),
         ...activationUrlPayload(),
+        ...updatePayload(),
       });
     }
 
@@ -305,6 +320,7 @@ function buildRouter() {
         expiresAt: binding.expires_at,
         contact: contactPayload(),
         ...activationUrlPayload(),
+        ...updatePayload(),
         ...signed,
       });
     }
@@ -316,6 +332,7 @@ function buildRouter() {
       expiresAt: binding.expires_at,
       contact: contactPayload(),
       ...activationUrlPayload(),
+      ...updatePayload(),
     });
   });
 

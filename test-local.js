@@ -213,6 +213,45 @@ async function main() {
   const cfg2 = await req('GET', '/api/v1/config');
   ok('public config reflects update', cfg2.data.contact.phone === '+972 59 333 4444');
 
+  // v6.0 (الجولة 66 #4): التحديث الإجباري — الضبط، الوصول عبر
+  // config/activate/heartbeat، التحقق من الصيغة، ثم الإفراغ.
+  const badVer = await req('PUT', '/api/admin/config', {
+    token: T, body: {minAppVersion: 'abc'},
+  });
+  ok('bad min version rejected', badVer.status === 400 && badVer.data.error === 'BAD_MIN_APP_VERSION');
+  const badUrl = await req('PUT', '/api/admin/config', {
+    token: T, body: {updateUrl: 'ftp://nope'},
+  });
+  ok('bad update url rejected', badUrl.status === 400 && badUrl.data.error === 'BAD_UPDATE_URL');
+  const setUpdate = await req('PUT', '/api/admin/config', {
+    token: T,
+    body: {
+      minAppVersion: '62.0.0',
+      updateUrl: 'https://play.google.com/store/apps/details?id=com.sela.pal',
+    },
+  });
+  ok('force-update config saved',
+    setUpdate.status === 200 && setUpdate.data.minAppVersion === '62.0.0');
+  const cfg3 = await req('GET', '/api/v1/config');
+  ok('public config carries force-update',
+    cfg3.data.minAppVersion === '62.0.0' &&
+    cfg3.data.updateUrl.startsWith('https://play.google.com/'));
+  const actUpd = await req('POST', '/api/v1/activate', {
+    body: {key: KEY, deviceId: 'dev-aaa-111'},
+  });
+  ok('activate carries force-update (idempotent re-activation)',
+    actUpd.status === 200 && actUpd.data.minAppVersion === '62.0.0');
+  const hbUpd = await req('POST', '/api/v1/heartbeat', {
+    body: {license: act1.data.license, signature: act1.data.signature, deviceId: 'dev-aaa-111'},
+  });
+  ok('heartbeat carries force-update', hbUpd.data.minAppVersion === '62.0.0');
+  const clearUpdate = await req('PUT', '/api/admin/config', {
+    token: T, body: {minAppVersion: ''},
+  });
+  ok('force-update cleared', clearUpdate.status === 200 && clearUpdate.data.minAppVersion === '');
+  const cfg4 = await req('GET', '/api/v1/config');
+  ok('public config reflects clearing', cfg4.data.minAppVersion === '');
+
   console.log('— revoke / unbind —');
   const revoke = await req('POST', `/api/admin/keys/${keyId}/revoke`, {token: T});
   ok('revoke ok', revoke.data.changed === true);

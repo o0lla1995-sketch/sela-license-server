@@ -2906,6 +2906,21 @@ async function viewSettings() {
     '<p class="dim tiny mt">ملاحظات مهمة: <b>الخادم الجديد يجب أن يستخدم نفس قاعدة البيانات ونفس مفتاح التوقيع</b> حتى لا تُرفض التراخيص. أبقِ هذا الخادم القديم يعمل حتى تنتقل الأجهزة كلها (يظهر العداد في لوحة المعلومات)، ثم يمكنك إخلاء الحقل لتفريغه.</p>' +
     '</div>' +
 
+    /* v6.0 — التحديث الإجباري للتطبيق (الجولة 66 #4) */
+    '<div class="card"><div class="card-title">' +
+    '<svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>' +
+    'التحديث الإجباري للتطبيق</div>' +
+    '<p class="dim tiny mb">عند رفع نسخة جديدة على جوجل بلاي: اكتب أقل إصدار مدعوم (مثل <b dir="ltr">62.0.0</b>) ورابط صفحة التطبيق — كل جهاز إصداره أقل من ذلك تُقفل شاشته على «يتوفر تحديث إجباري» مع زر تحديث مباشر، خلال <b>ساعة كحد أقصى</b> من أول اتصال له بالخادم. أفرد الحقل الأول لإلغاء الإجبار عن الجميع.</p>' +
+    '<div class="row-2">' +
+    '<div class="field"><label>أقل إصدار مدعوم (اتركه فارغاً لإلغاء الإجبار)</label>' +
+    '<input class="input" id="stMinAppVersion" dir="ltr" placeholder="62.0.0" maxlength="12" value="' + esc(cfg.minAppVersion || '') + '"></div>' +
+    '<div class="field"><label>رابط التحديث (جوجل بلاي أو صفحة التنزيل)</label>' +
+    '<input class="input" id="stUpdateUrl" dir="ltr" placeholder="https://play.google.com/store/apps/details?id=com.sela.pal" maxlength="300" value="' + esc(cfg.updateUrl || '') + '"></div>' +
+    '</div>' +
+    '<button class="btn primary" id="stSaveUpdate">حفظ إعدادات التحديث</button>' +
+    '<p class="dim tiny mt">لا يُجبَر أي جهاز إلا عند ضبط الإصدار الأدنى — رابط التحديث وحده يُستعمل زراً في رسالة التحديث. تأكد من نشر النسخة الجديدة على جوجل بلاي <b>قبل</b> رفع الحد الأدنى حتى لا يبقى أحد بلا تحديث.</p>' +
+    '</div>' +
+
     /* v5.0 — أمن حسابات سيلا ماركت: مفتاح «نسيت كلمة المرور» +
      * مزود الرسائل القصيرة متعدد المزودين + رسالة اختبار. */
     (sec ? (
@@ -3001,6 +3016,28 @@ async function viewSettings() {
       toast(val === '' ? 'تم تفريغ رابط التفعيل — الأجهزة تبقى على عناوينها' : 'تم حفظ رابط التفعيل — ستتبناه الأجهزة تلقائياً', 'success');
     } catch (err) {
       showErr(err.message === 'BAD_ACTIVATION_URL' ? 'رابط غير صالح' : err);
+    }
+  };
+  /* v6.0 (الجولة 66 #4): حفظ إعدادات التحديث الإجباري. */
+  $('#stSaveUpdate').onclick = async () => {
+    const ver = $('#stMinAppVersion').value.trim();
+    const url = $('#stUpdateUrl').value.trim();
+    if (ver !== '' && !/^\d+(\.\d+){0,3}$/.test(ver)) {
+      return toast('الإصدار يجب أن يكون أرقاماً بنقاط فقط — مثال: 62.0.0', 'error');
+    }
+    if (url !== '' && !/^https?:\/\/.+\..+/.test(url)) {
+      return toast('رابط التحديث يجب أن يبدأ بـ http:// أو https:// ويحتوي نطاقاً صالحاً', 'error');
+    }
+    try {
+      await api('/config', {
+        method: 'PUT',
+        body: {minAppVersion: ver, updateUrl: url},
+      });
+      toast(ver === ''
+        ? 'أُلغي التحديث الإجباري — الأجهزة تعمل بلا قيود إصدار'
+        : 'تم الحفظ — الأجهزة الأقدم من ' + ver + ' ستُقفل على شاشة التحديث خلال ساعة كحد أقصى', 'success');
+    } catch (err) {
+      showErr(err);
     }
   };
   $('#pwSave').onclick = async () => {

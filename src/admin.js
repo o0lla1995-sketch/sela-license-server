@@ -441,6 +441,10 @@ function buildAdminRouter() {
       // عند نقل النشر (Coolify/نطاق جديد). فارغ = التطبيق يبقى على
       // عنوانه الحالي.
       activationUrl: getSetting('activation_url', ''),
+      // v6.0 (الجولة 66 #4): التحديث الإجباري — أقل إصدار مدعوم
+      // + رابط التحديث (جوجل بلاي أو صفحة التنزيل).
+      minAppVersion: getSetting('min_app_version', ''),
+      updateUrl: getSetting('update_url', ''),
       pricing: {
         trial: Number(getSetting('price_trial', '0')),
         monthly: Number(getSetting('price_monthly', '50')),
@@ -451,8 +455,18 @@ function buildAdminRouter() {
   });
 
   router.put('/config', (req, res) => {
-    const {phone, whatsapp, telegram, email, note, currency, pricing, activationUrl} =
-      req.body || {};
+    const {
+      phone,
+      whatsapp,
+      telegram,
+      email,
+      note,
+      currency,
+      pricing,
+      activationUrl,
+      minAppVersion,
+      updateUrl,
+    } = req.body || {};
 
     if (typeof phone === 'string') setSetting('contact_phone', phone.trim());
     if (typeof whatsapp === 'string') setSetting('contact_whatsapp', whatsapp.trim());
@@ -497,11 +511,50 @@ function buildAdminRouter() {
         }
       }
     }
+    // v6.0 (الجولة 66 #4): التحديث الإجباري — الإصدار الأدنى بصيغة
+    // أرقام نقاط (مثل 62.0.0) أو نص فارغ لإلغاء الإجبار، ورابط
+    // http(s) صالح أو فارغ. يصلان لكل جهاز مع أول اتصال.
+    if (minAppVersion !== undefined) {
+      const v = String(minAppVersion || '').trim();
+      if (v !== '' && !/^\d+(\.\d+){0,3}$/.test(v)) {
+        return res.status(400).json({ok: false, error: 'BAD_MIN_APP_VERSION'});
+      }
+      setSetting('min_app_version', v);
+      audit('admin_update_min_app_version', {
+        adminId: req.adminUser.id,
+        ip: req.ip,
+        details: {minAppVersion: v},
+      });
+    }
+    if (updateUrl !== undefined) {
+      const url = String(updateUrl || '').trim();
+      if (url !== '') {
+        let ok = false;
+        try {
+          const u = new URL(url);
+          ok = (u.protocol === 'http:' || u.protocol === 'https:') &&
+            u.hostname.length > 3 && url.length <= 300;
+        } catch (_e) {
+          ok = false;
+        }
+        if (!ok) {
+          return res.status(400).json({ok: false, error: 'BAD_UPDATE_URL'});
+        }
+      }
+      setSetting('update_url', url);
+      audit('admin_update_update_url', {
+        adminId: req.adminUser.id,
+        ip: req.ip,
+        details: {updateUrl: url},
+      });
+    }
     audit('admin_update_config', {adminId: req.adminUser.id, ip: req.ip});
     res.json({
       ok: true,
       contact: contactPayload(),
       activationUrl: getSetting('activation_url', ''),
+      minAppVersion: getSetting('min_app_version', ''),
+      updateUrl: getSetting('update_url', ''),
     });
   });
 
