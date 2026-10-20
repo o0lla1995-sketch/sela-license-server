@@ -1719,6 +1719,19 @@ function ratingHtml(avg, count) {
     '<small class="dim">(' + count + ')</small></span>';
 }
 
+/* v5.9 — أسباب موت المتجر بالعربية (منتجاته «يتيمة» لا مزامنة لها) */
+const DEAD_REASON_LABELS = {
+  key_missing: ['مفتاح محذوف', 'red'],
+  revoked: ['مفتاح موقوف', 'red'],
+  no_subscription: ['بلا اشتراك', 'red'],
+  expired: ['اشتراك منتهٍ', 'red'],
+};
+
+function deadBadgeHtml(reason) {
+  const l = DEAD_REASON_LABELS[reason];
+  return l ? '<span class="badge ' + l[1] + '">' + l[0] + '</span>' : '';
+}
+
 async function viewMarket() {
   const [stats, stores] = await Promise.all([
     api('/market/stats'),
@@ -1738,70 +1751,148 @@ async function viewMarket() {
     ? 'متوسط ' + (Number(stats.ratingAvg) || 0).toFixed(1) + ' من ' + stats.ratingCount + ' تقييم'
     : 'لا تقييمات بعد';
 
-  const storeRows = (stores.stores || []).map((s) =>
-    '<tr>' +
-    '<td><div class="store-cell">' + storeAvatarHtml(s.logo_url, s.name, 34) +
-    '<div><b>' + esc(s.name) + '</b><br><span class="dim tiny mono" dir="ltr">' + esc(s.store_number) + '</span></div></div></td>' +
-    '<td>' + (s.published
-      ? '<span class="badge green">منشور</span>'
-      : '<span class="badge">مخفي</span>') + '</td>' +
-    '<td>' + (s.subscriptionActive
-      ? '<span class="badge green">فعّال</span>'
-      : '<span class="badge red">منتهي</span>') + '</td>' +
-    '<td class="num">' + (s.products_count || 0) +
-      (s.offers_count > 0 ? ' <span class="badge orange">' + s.offers_count + ' عرض</span>' : '') + '</td>' +
-    '<td>' + ratingHtml(s.rating_avg, s.rating_count) + '</td>' +
-    '<td class="num">' + (s.orders_count || 0) +
-      (s.new_orders > 0 ? ' <span class="badge amber">' + s.new_orders + ' جديد</span>' : '') + '</td>' +
-    '<td class="dim tiny">' + esc(fmtDate(s.updated_at)) + '</td>' +
-    '<td class="actions">' +
-    '<button class="btn small" data-mfull="' + s.id + '">بطاقة المتجر</button> ' +
-    '<button class="btn ghost small" data-morders="' + s.id + '">الطلبات</button> ' +
-    (s.published
-      ? '<button class="btn danger small" data-munpublish="' + s.id + '">إخفاء</button>'
-      : (s.subscriptionActive
-        ? '<button class="btn success small" data-mpublish="' + s.id + '">نشر</button>'
-        : '')) +
-    '</td></tr>'
-  ).join('');
+  /* v5.9 — فلترة المتاجر (بحث + حالة) على العميل: القائمة 500
+   * متجر كحد أقصى من الخادم — الفلترة الفورية أخف من نداء لكل حرف. */
+  const allStores = stores.stores || [];
+  function visibleStores() {
+    const q = ($('#mktSearch') && $('#mktSearch').value.trim()) || '';
+    const f = ($('#mktFilter') && $('#mktFilter').value) || 'all';
+    const ql = q.toLowerCase();
+    return allStores.filter((s) => {
+      if (q &&
+        !String(s.name || '').includes(q) &&
+        !String(s.store_number || '').toLowerCase().includes(ql) &&
+        !String(s.key_plain || '').toLowerCase().includes(ql)) {
+        return false;
+      }
+      if (f === 'published') return !!s.published && !s.deadReason;
+      if (f === 'hidden') return !s.published;
+      if (f === 'active') return !!s.subscriptionActive;
+      if (f === 'expired') return !s.subscriptionActive && !s.deadReason;
+      if (f === 'dead') return !!s.deadReason;
+      return true;
+    });
+  }
 
-  /* v5.0 — بطاقات جوال للمتاجر: الجداول مخفية تحت 820px (تصميم
-   * الجوال) لكن هذا القسم لم يكن يبني بديلاً — فكان المالك على
-   * هاتفه يرى الإحصائيات فقط بلا أي متجر (السبب الجذري لشكوى
-   * «لا تظهر جداول المتاجر»). نفس أزرار الجدول بعينها عبر data-*. */
-  const storeCards = (stores.stores || []).map((s) =>
-    '<div class="mcard">' +
-    '<div class="m-top">' +
-    '<span class="m-title" style="display:flex;align-items:center;gap:8px">' +
-    storeAvatarHtml(s.logo_url, s.name, 30) + esc(s.name) + '</span>' +
-    (s.published
-      ? '<span class="badge green">منشور</span>'
-      : '<span class="badge">مخفي</span>') +
-    '</div>' +
-    '<div class="m-rows">' +
-    '<div class="r"><span>الاشتراك</span><b>' +
-      (s.subscriptionActive
-        ? '<span class="badge green">فعّال</span>'
-        : '<span class="badge red">منتهي</span>') + '</b></div>' +
-    '<div class="r"><span>المنتجات</span><b>' + (s.products_count || 0) +
-      (s.offers_count > 0 ? ' <span class="badge orange">' + s.offers_count + ' عرض</span>' : '') + '</b></div>' +
-    '<div class="r"><span>التقييم</span><b>' + (s.rating_count
-      ? (Number(s.rating_avg) || 0).toFixed(1) + ' ★ (' + s.rating_count + ')'
-      : '—') + '</b></div>' +
-    '<div class="r"><span>الطلبات</span><b>' + (s.orders_count || 0) +
-      (s.new_orders > 0 ? ' <span class="badge amber">' + s.new_orders + ' جديد</span>' : '') + '</b></div>' +
-    '<div class="r"><span>الرقم</span><b class="mono" dir="ltr">' + esc(s.store_number) + '</b></div>' +
-    '</div>' +
-    '<div class="m-actions">' +
-    '<button class="btn small" data-mfull="' + s.id + '">بطاقة المتجر</button>' +
-    '<button class="btn ghost small" data-morders="' + s.id + '">الطلبات</button>' +
-    (s.published
-      ? '<button class="btn danger small" data-munpublish="' + s.id + '">إخفاء</button>'
-      : (s.subscriptionActive
-        ? '<button class="btn success small" data-mpublish="' + s.id + '">نشر</button>'
-        : '')) +
-    '</div></div>'
-  ).join('');
+  function storeRowsHtml(list) {
+    return list.map((s) =>
+      '<tr' + (s.deadReason ? ' style="opacity:.7"' : '') + '>' +
+      '<td><div class="store-cell">' + storeAvatarHtml(s.logo_url, s.name, 34) +
+      '<div><b>' + esc(s.name) + '</b><br><span class="dim tiny mono" dir="ltr">' + esc(s.store_number) + '</span></div></div></td>' +
+      '<td>' + (s.published
+        ? '<span class="badge green">منشور</span>'
+        : '<span class="badge">مخفي</span>') +
+        (s.deadReason ? '<br>' + deadBadgeHtml(s.deadReason) : '') + '</td>' +
+      '<td>' + (s.key_missing
+        ? '<span class="badge red">بلا مفتاح</span>'
+        : (s.subscriptionActive
+          ? '<span class="badge green">فعّال</span>'
+          : '<span class="badge red">منتهي</span>')) + '</td>' +
+      '<td class="num">' + (s.products_count || 0) +
+        (s.offers_count > 0 ? ' <span class="badge orange">' + s.offers_count + ' عرض</span>' : '') + '</td>' +
+      '<td>' + ratingHtml(s.rating_avg, s.rating_count) + '</td>' +
+      '<td class="num">' + (s.orders_count || 0) +
+        (s.new_orders > 0 ? ' <span class="badge amber">' + s.new_orders + ' جديد</span>' : '') + '</td>' +
+      '<td class="dim tiny">' + esc(fmtDate(s.updated_at)) + '</td>' +
+      '<td class="actions">' +
+      '<button class="btn small" data-mfull="' + s.id + '">بطاقة المتجر</button> ' +
+      '<button class="btn ghost small" data-morders="' + s.id + '">الطلبات</button> ' +
+      (s.published
+        ? '<button class="btn danger small" data-munpublish="' + s.id + '">إخفاء</button>'
+        : (s.subscriptionActive
+          ? '<button class="btn success small" data-mpublish="' + s.id + '">نشر</button>'
+          : '')) +
+      '</td></tr>'
+    ).join('');
+  }
+
+  /* v5.0 — بطاقات جوال للمتاجر (v5.9: نفس فلاتر الجدول وعلامات
+   * المتاجر الميتة) — الجداول مخفية تحت 820px. */
+  function storeCardsHtml(list) {
+    return list.map((s) =>
+      '<div class="mcard"' + (s.deadReason ? ' style="opacity:.75"' : '') + '>' +
+      '<div class="m-top">' +
+      '<span class="m-title" style="display:flex;align-items:center;gap:8px">' +
+      storeAvatarHtml(s.logo_url, s.name, 30) + esc(s.name) + '</span>' +
+      (s.published
+        ? '<span class="badge green">منشور</span>'
+        : '<span class="badge">مخفي</span>') +
+      '</div>' +
+      '<div class="m-rows">' +
+      '<div class="r"><span>الاشتراك</span><b>' +
+      (s.key_missing
+        ? '<span class="badge red">بلا مفتاح</span>'
+        : (s.subscriptionActive
+          ? '<span class="badge green">فعّال</span>'
+          : '<span class="badge red">منتهي</span>')) +
+        (s.deadReason ? ' ' + deadBadgeHtml(s.deadReason) : '') + '</b></div>' +
+      '<div class="r"><span>المنتجات</span><b>' + (s.products_count || 0) +
+        (s.offers_count > 0 ? ' <span class="badge orange">' + s.offers_count + ' عرض</span>' : '') + '</b></div>' +
+      '<div class="r"><span>التقييم</span><b>' + (s.rating_count
+        ? (Number(s.rating_avg) || 0).toFixed(1) + ' ★ (' + s.rating_count + ')'
+        : '—') + '</b></div>' +
+      '<div class="r"><span>الطلبات</span><b>' + (s.orders_count || 0) +
+        (s.new_orders > 0 ? ' <span class="badge amber">' + s.new_orders + ' جديد</span>' : '') + '</b></div>' +
+      '<div class="r"><span>الرقم</span><b class="mono" dir="ltr">' + esc(s.store_number) + '</b></div>' +
+      '</div>' +
+      '<div class="m-actions">' +
+      '<button class="btn small" data-mfull="' + s.id + '">بطاقة المتجر</button>' +
+      '<button class="btn ghost small" data-morders="' + s.id + '">الطلبات</button>' +
+      (s.published
+        ? '<button class="btn danger small" data-munpublish="' + s.id + '">إخفاء</button>'
+        : (s.subscriptionActive
+          ? '<button class="btn success small" data-mpublish="' + s.id + '">نشر</button>'
+          : '')) +
+      '</div></div>'
+    ).join('');
+  }
+
+  function renderStoresList() {
+    const list = visibleStores();
+    const rowsBox = $('#mktRows');
+    const cardsBox = $('#mktCards');
+    const countBox = $('#mktCount');
+    if (rowsBox) {
+      rowsBox.innerHTML = storeRowsHtml(list) ||
+        '<tr><td colspan="8" class="empty">لا متاجر تطابق البحث/الفلتر</td></tr>';
+    }
+    if (cardsBox) {
+      cardsBox.innerHTML = storeCardsHtml(list) ||
+        '<div class="empty">لا متاجر تطابق البحث/الفلتر</div>';
+    }
+    if (countBox) {
+      countBox.textContent = list.length + ' من ' + allStores.length + ' متجر';
+    }
+    bindStoreActions();
+  }
+
+  function bindStoreActions() {
+    $$('[data-munpublish]').forEach((b) => {
+      b.onclick = () =>
+        confirmModal('إخفاء المتجر', 'ستختفي منتجات المتجر من تطبيق المستخدمين فوراً. المتجر نفسه بياناته محفوظة.', 'إخفاء', async () => {
+          await api('/market/stores/' + b.getAttribute('data-munpublish') + '/publish',
+            {method: 'POST', body: {published: false}});
+          toast('تم إخفاء المتجر', 'success');
+          viewMarket().catch(showErr);
+        });
+    });
+    $$('[data-mpublish]').forEach((b) => {
+      b.onclick = async () => {
+        try {
+          await api('/market/stores/' + b.getAttribute('data-mpublish') + '/publish',
+            {method: 'POST', body: {published: true}});
+          toast('تم نشر المتجر', 'success');
+          viewMarket().catch(showErr);
+        } catch (err) { showErr(err); }
+      };
+    });
+    $$('[data-morders]').forEach((b) => {
+      b.onclick = () => loadMarketOrders(Number(b.getAttribute('data-morders'))).catch(showErr);
+    });
+    $$('[data-mfull]').forEach((b) => {
+      b.onclick = () => openStoreFullModal(Number(b.getAttribute('data-mfull'))).catch(showErr);
+    });
+  }
 
   $('#view').innerHTML =
     '<div class="page-head"><div><h1>المتاجر والطلبات (البيع أونلاين)</h1>' +
@@ -1811,6 +1902,10 @@ async function viewMarket() {
     kpi('متاجر مسجلة', String(stats.stores || 0), (stats.publishedStores || 0) + ' منشورة') +
     kpi('منتجات معروضة', String(stats.products || 0),
       (stats.discountedProducts || 0) + ' عليها عروض تخفيضات', 'accent') +
+    ((stats.ghostProducts || 0) > 0
+      ? kpi('منتجات يتيمة', String(stats.ghostProducts || 0),
+          'منتجات متاجر ميتة بلا تنظيف — نظّفها من بطاقة «التنظيف» أدناه', 'red')
+      : '') +
     kpi('مستخدمو المتجر', String(stats.users || 0),
       (stats.activeUsers || 0) + ' نشط آخر 30 يومًا · ' + (stats.addresses || 0) + ' عنوان') +
     kpi('إجمالي الطلبات', String(stats.orders || 0),
@@ -1821,15 +1916,37 @@ async function viewMarket() {
       ratingSub, 'accent') +
     '</div></div>' +
 
+    /* v5.9 — بحث وفلترة المتاجر (الاسم/الرقم/المفتاح + الحالة) */
     '<div class="card">' +
-    ((stores.stores || []).length
+    '<div class="flex wrap" style="gap:8px;margin-bottom:10px">' +
+    '<input class="input" id="mktSearch" placeholder="بحث بالاسم أو رقم المتجر أو المفتاح…" style="max-width:280px">' +
+    '<select class="input" id="mktFilter" style="max-width:190px">' +
+    '<option value="all">كل المتاجر</option>' +
+    '<option value="published">المنشورة</option>' +
+    '<option value="hidden">المخفية</option>' +
+    '<option value="active">اشتراك فعّال</option>' +
+    '<option value="expired">اشتراك منتهٍ</option>' +
+    '<option value="dead">ميتة (منتجات يتيمة)</option>' +
+    '</select>' +
+    '<span class="dim tiny" id="mktCount" style="align-self:center"></span>' +
+    '</div>' +
+    ((allStores.length)
       ? '<div class="table-wrap"><table class="tbl"><thead><tr>' +
         '<th>المتجر</th><th>النشر</th><th>الاشتراك</th><th>منتجات</th>' +
         '<th>التقييم</th><th>طلبات</th><th>آخر تحديث</th><th></th>' +
-        '</tr></thead><tbody>' + storeRows + '</tbody></table></div>' +
-        '<div class="cards-list">' + storeCards + '</div>'
+        '</tr></thead><tbody id="mktRows"></tbody></table></div>' +
+        '<div class="cards-list" id="mktCards"></div>'
       : '<div class="empty">لا متاجر بعد — تُنشأ تلقائياً عندما يفعّل التاجر «البيع أونلاين» من تطبيق نقطة البيع</div>') +
     '</div>' +
+
+    /* v5.9 — تنظيف المتاجر الميتة والمنتجات اليتيمة (طلب المالك) */
+    '<div class="card"><div class="card-title">تنظيف المتاجر الميتة والمنتجات اليتيمة</div>' +
+    '<div class="card-title hint">منتجات متاجر حُذف مفتاحها أو أُوقف أو انتهى اشتراكها منذ أكثر من ١٤ يوماً — لا مزامنة ولن تعود، وتبقى «معروضة» في القاعدة بلا تنظيف. افحص، راجع العينات، ثم أخفِ (تحذفها دورة التنظيف بعد ١٤ يوماً) أو احذف نهائياً. المتجر الحي محمي دائماً.</div>' +
+    '<div class="flex wrap" style="gap:8px;margin-bottom:10px">' +
+    '<button class="btn small" id="orphScan">فحص الآن</button>' +
+    '<button class="btn ghost small" id="orphCleanAll" style="display:none">إخفاء كل المنتجات اليتيمة</button>' +
+    '<span class="dim tiny" id="orphSummary" style="align-self:center"></span>' +
+    '</div><div id="orphBox"><div class="empty">اضغط «فحص الآن» لعرض المتاجر الميتة ومنتجاتها اليتيمة</div></div></div>' +
 
     '<div class="card"><div class="card-title">آخر الطلبات</div>' +
     '<div class="card-title hint">اختر «الطلبات» من جدول المتاجر لتظهر هنا</div>' +
@@ -1867,31 +1984,35 @@ async function viewMarket() {
     '<button class="btn ghost small" id="mreqReset">تصفير العدادات</button>' +
     '</div><div id="marketReqBox"><div class="empty">اضغط «تحديث السجل»</div></div></div>';
 
-  $$('[data-munpublish]').forEach((b) => {
-    b.onclick = () =>
-      confirmModal('إخفاء المتجر', 'ستختفي منتجات المتجر من تطبيق المستخدمين فوراً. المتجر نفسه بياناته محفوظة.', 'إخفاء', async () => {
-        await api('/market/stores/' + b.getAttribute('data-munpublish') + '/publish',
-          {method: 'POST', body: {published: false}});
-        toast('تم إخفاء المتجر', 'success');
-        viewMarket().catch(showErr);
-      });
-  });
-  $$('[data-mpublish]').forEach((b) => {
-    b.onclick = async () => {
-      try {
-        await api('/market/stores/' + b.getAttribute('data-mpublish') + '/publish',
-          {method: 'POST', body: {published: true}});
-        toast('تم نشر المتجر', 'success');
-        viewMarket().catch(showErr);
-      } catch (err) { showErr(err); }
-    };
-  });
-  $$('[data-morders]').forEach((b) => {
-    b.onclick = () => loadMarketOrders(Number(b.getAttribute('data-morders'))).catch(showErr);
-  });
-  $$('[data-mfull]').forEach((b) => {
-    b.onclick = () => openStoreFullModal(Number(b.getAttribute('data-mfull'))).catch(showErr);
-  });
+  /* v5.9 — ربط الفلاتر وإعادة العرض الفوري */
+  const searchInput = $('#mktSearch');
+  const filterSelect = $('#mktFilter');
+  if (searchInput) {
+    searchInput.oninput = renderStoresList;
+  }
+  if (filterSelect) {
+    filterSelect.onchange = renderStoresList;
+  }
+  renderStoresList();
+
+  /* v5.9 — فحص/تنظيف المتاجر الميتة */
+  const orphScanBtn = $('#orphScan');
+  if (orphScanBtn) {
+    orphScanBtn.onclick = () => loadOrphanScan().catch(showErr);
+  }
+  const orphCleanAllBtn = $('#orphCleanAll');
+  if (orphCleanAllBtn) {
+    orphCleanAllBtn.onclick = () =>
+      confirmModal('إخفاء كل المنتجات اليتيمة',
+        'ستُخفى كل منتجات كل المتاجر الميتة دفعة واحدة (تحذفها نهائياً دورة التنظيف بعد ١٤ يوماً). المتاجر الحية لن تُمس.',
+        'إخفاء الكل', async () => {
+          const r = await api('/market/stores/orphan-clean',
+            {method: 'POST', body: {all: true, mode: 'hide'}});
+          toast('أُخفيت ' + (r.productsHidden || 0) + ' منتجاً يتيمًا في ' + (r.stores || 0) + ' متجر ميت', 'success');
+          loadOrphanScan().catch(showErr);
+          viewMarket().catch(showErr);
+        });
+  }
 
   /* v5.1: سجل طلبات المول — تحديث يدوي وتلقائي كل 5 ثوانٍ */
   const reqLoadBtn = $('#mreqLoad');
@@ -1924,6 +2045,126 @@ async function viewMarket() {
         loadMarketRequestLog().catch(showErr);
       });
   }
+}
+
+/* ═══════ v5.9: فحص/تنظيف المتاجر الميتة (بطاقة القسم) ═══════════
+ * يعرض مجموعات: متجر + سبب الموت + عدد المنتجات اليتيمة + عينة +
+ * عدد الطلبات، مع إخفاء/حذف منتجات كل مجموعة وحذف المتجر الميت
+ * نفسه إن كان بلا طلبات. */
+async function loadOrphanScan() {
+  const box = $('#orphBox');
+  const summary = $('#orphSummary');
+  const cleanAllBtn = $('#orphCleanAll');
+  if (!box) return;
+  box.innerHTML = '<div class="empty">جارٍ الفحص…</div>';
+  const d = await api('/market/stores/orphan-scan');
+  const groups = d.groups || [];
+  const totals = d.totals || {};
+
+  if (!groups.length) {
+    box.innerHTML = '<div class="empty">لا متاجر ميتة — كل المتاجر بأصول حية أو بلا منتجات يتيمة</div>';
+    if (summary) summary.textContent = '';
+    if (cleanAllBtn) cleanAllBtn.style.display = 'none';
+    return;
+  }
+
+  if (summary) {
+    summary.textContent = totals.deadStores + ' متجر ميت · ' +
+      (totals.orphanProducts || 0) + ' منتج يتيم · ' +
+      (totals.deletableStores || 0) + ' متجر قابل للحذف الكامل';
+  }
+  if (cleanAllBtn) cleanAllBtn.style.display = '';
+
+  const reasonBadge = (g) => {
+    const l = DEAD_REASON_LABELS[g.reason] || [g.reason, 'red'];
+    return '<span class="badge ' + l[1] + '">' + l[0] + '</span>';
+  };
+
+  const rows = groups.map((g) =>
+    '<tr>' +
+    '<td><b>' + esc(g.store.name) + '</b><br>' +
+    '<span class="dim tiny mono" dir="ltr">' + esc(g.store.store_number) + '</span></td>' +
+    '<td>' + reasonBadge(g) + '</td>' +
+    '<td class="num"><b>' + (g.products || 0) + '</b>' +
+      (g.unavailable > 0 ? '<br><span class="dim tiny">+' + g.unavailable + ' مسحوب</span>' : '') + '</td>' +
+    '<td class="dim tiny">' + (g.sample && g.sample.length
+      ? esc(g.sample.slice(0, 3).join(' · ')) + (g.sample.length > 3 ? '…' : '')
+      : '—') + '</td>' +
+    '<td class="dim tiny">' + esc(fmtDate(g.lastProductUpdate)) + '</td>' +
+    '<td class="num">' + (g.orders || 0) + '</td>' +
+    '<td class="actions">' +
+    '<button class="btn ghost small" data-orph-hide="' + g.store.id + '">إخفاء المنتجات</button> ' +
+    '<button class="btn danger small" data-orph-del="' + g.store.id + '">حذف المنتجات</button>' +
+    (g.deletableStore
+      ? ' <button class="btn danger small" data-orph-dstore="' + g.store.id + '">حذف المتجر نهائياً</button>'
+      : '') +
+    '</td></tr>'
+  ).join('');
+
+  const cards = groups.map((g) =>
+    '<div class="mcard">' +
+    '<div class="m-top"><span class="m-title">' + esc(g.store.name) + '</span>' + reasonBadge(g) + '</div>' +
+    '<div class="m-rows">' +
+    '<div class="r"><span>الرقم</span><b class="mono" dir="ltr">' + esc(g.store.store_number) + '</b></div>' +
+    '<div class="r"><span>منتجات يتيمة</span><b>' + (g.products || 0) +
+      (g.unavailable > 0 ? ' <span class="dim tiny">(+' + g.unavailable + ' مسحوب)</span>' : '') + '</b></div>' +
+    '<div class="r"><span>عينة</span><b>' + (g.sample && g.sample.length ? esc(g.sample.slice(0, 2).join(' · ')) : '—') + '</b></div>' +
+    '<div class="r"><span>آخر مزامنة</span><b>' + esc(fmtDate(g.lastProductUpdate)) + '</b></div>' +
+    '<div class="r"><span>طلبات</span><b>' + (g.orders || 0) + '</b></div>' +
+    '</div>' +
+    '<div class="m-actions">' +
+    '<button class="btn ghost small" data-orph-hide="' + g.store.id + '">إخفاء المنتجات</button>' +
+    '<button class="btn danger small" data-orph-del="' + g.store.id + '">حذف المنتجات</button>' +
+    (g.deletableStore
+      ? '<button class="btn danger small" data-orph-dstore="' + g.store.id + '">حذف المتجر نهائياً</button>'
+      : '') +
+    '</div></div>'
+  ).join('');
+
+  box.innerHTML =
+    '<div class="table-wrap"><table class="tbl"><thead><tr>' +
+    '<th>المتجر</th><th>السبب</th><th>منتجات معروضة</th><th>عينة</th>' +
+    '<th>آخر مزامنة</th><th>طلبات</th><th></th>' +
+    '</tr></thead><tbody>' + rows + '</tbody></table></div>' +
+    '<div class="cards-list">' + cards + '</div>';
+
+  const refreshAfter = () => {
+    loadOrphanScan().catch(showErr);
+    viewMarket().catch(showErr);
+  };
+
+  $$('[data-orph-hide]').forEach((b) => {
+    b.onclick = () =>
+      confirmModal('إخفاء منتجات المتجر الميت',
+        'ستُخفى منتجات هذا المتجر الميت من أي عرض، وتحذفها نهائياً دورة التنظيف الدوري بعد ١٤ يوماً.',
+        'إخفاء', async () => {
+          const r = await api('/market/stores/orphan-clean',
+            {method: 'POST', body: {storeIds: [Number(b.getAttribute('data-orph-hide'))], mode: 'hide'}});
+          toast('أُخفي ' + (r.productsHidden || 0) + ' منتجاً', 'success');
+          refreshAfter();
+        });
+  });
+  $$('[data-orph-del]').forEach((b) => {
+    b.onclick = () =>
+      confirmModal('حذف منتجات المتجر الميت نهائياً',
+        'حذف نهائي لكل منتجات هذا المتجر الميت (صورها تُكنس دورياً). لا يمكن التراجع.',
+        'حذف نهائي', async () => {
+          const r = await api('/market/stores/orphan-clean',
+            {method: 'POST', body: {storeIds: [Number(b.getAttribute('data-orph-del'))], mode: 'delete'}});
+          toast('حُذف ' + (r.productsDeleted || 0) + ' منتجاً نهائياً', 'success');
+          refreshAfter();
+        });
+  });
+  $$('[data-orph-dstore]').forEach((b) => {
+    b.onclick = () =>
+      confirmModal('حذف المتجر الميت نهائياً',
+        'حذف صف المتجر ومنتجاته ومناطق توصيله وصوره وملفاتها من القرص نهائياً (لا طلبات لهذا المتجر). لا يمكن التراجع.',
+        'حذف نهائي', async () => {
+          await api('/market/stores/' + b.getAttribute('data-orph-dstore') + '/delete', {method: 'POST'});
+          toast('حُذف المتجر الميت نهائياً', 'success');
+          refreshAfter();
+        });
+  });
 }
 
 /* ═════════ v5.1: سجل طلبات المول الحي ═══════════════════════════
@@ -2136,36 +2377,34 @@ async function viewMarketUsers() {
  * v4.6 — GET /market/stores/:id/full: الملف + الشعار + مناطق التوصيل +
  * الكتالوج بالخصومات والصور + التقييمات + الطلبات، مع تعديل الملف
  * من الإدارة مباشرة (POST /market/stores/:id/profile). */
-async function openStoreFullModal(storeId) {
-  const d = await api('/market/stores/' + storeId + '/full');
-  const s = d.store || {};
-  const products = d.products || [];
-  const reviews = d.reviews || [];
-  const orders = d.orders || [];
+/* ═══════════════════ FULL STORE CARD (بطاقة المتجر الكاملة) ═══════════════════
+ * v4.6 — GET /market/stores/:id/full: الملف + الشعار + مناطق التوصيل +
+ * الكتالوج بالخصومات والصور + التقييمات + الطلبات، مع تعديل الملف
+ * من الإدارة مباشرة (POST /market/stores/:id/profile).
+ * v5.9 (الجولة 71) — إدارة منتجات شاملة (طلب المالك: «مميزات أشمل
+ * وأوسع لعرض المنتجات وتفاصيلها وإمكانية إخفائها»):
+ *   • كتالوج كامل بلا حد 120: بحث (اسم/باركود/معرف) + فلاتر
+ *     (معروض/مسحوب/مخفي إدارياً/عروض/نافد/قديم) + صفحات.
+ *   • تفاصيل كل منتج: صورة مصغرة، التصنيف، الباركود، وحدة/وزن،
+ *     الوصف، السعر قبل/بعد الخصم، المخزون، آخر تحديث.
+ *   • إجراءات مفردة وجماعية: إخفاء/إظهار (دائم يقاوم المزامنة)
+ *     + حذف نهائي — كلها بتأكيد واضح وسجل تدقيق.
+ *   • زبائن المتجر (من طلب وكم وآخر طلب) + معلومات المفتاح
+ *     والاشتراك في رأس البطاقة. */
 
-  const productRows = products.slice(0, 120).map((p) => {
-    const price = (Number(p.price_minor) || 0) / 100;
-    const disc = Number(p.discount_pct) || 0;
-    const final = disc > 0 ? price * (1 - disc / 100) : price;
-    const hidden = p.admin_hidden === 1;
-    return '<tr' + (hidden ? ' style="opacity:.55"' : '') + '>' +
-      '<td><b>' + esc(p.name) + '</b>' +
-      (hidden ? ' <span class="badge">مخفي من الإدارة</span>' : '') +
-      (p.category ? '<br><span class="dim tiny">' + esc(p.category) + '</span>' : '') + '</td>' +
-      '<td class="num">' + (disc > 0
-        ? '<s class="dim">' + fmtMoney(price) + '</s> <b>' + fmtMoney(final) + '</b> <span class="badge orange">-' + disc + '%</span>'
-        : fmtMoney(price)) + '</td>' +
-      '<td class="num">' + (p.stock != null ? p.stock : '—') + '</td>' +
-      '<td class="num">' + (p.images && p.images.length
-        ? '<span class="badge blue">' + p.images.length + ' صورة</span>'
-        : '<span class="dim tiny">بلا صور</span>') + '</td>' +
-      '<td class="actions">' +
-      (hidden
-        ? '<button class="btn success small" data-pshow="' + p.id + '">إظهار</button>'
-        : '<button class="btn ghost small" data-phide="' + p.id + '">إخفاء</button>') +
-      '</td>' +
-      '</tr>';
-  }).join('');
+/* حالة إدارة منتجات المتجر المفتوح (تُعاد لكل بطاقة). sfModalSeq
+ * يحرس النداءات المتأخرة: فتح بطاقة أخرى أثناء التحميل يُبطل ردود
+ * البطاقة القديمة فلا تُرسم في مكان الخطأ. */
+let sfProducts = null;
+let sfModalSeq = 0;
+
+async function openStoreFullModal(storeId) {
+  const mySeq = ++sfModalSeq;
+  sfProducts = {storeId, q: '', filter: 'all', page: 1, per: 100, total: 0, selected: new Set()};
+  const d = await api('/market/stores/' + storeId + '/full');
+  if (mySeq !== sfModalSeq) return; // فُتحت بطاقة أخرى أثناء التحميل
+  const s = d.store || {};
+  const reviews = d.reviews || [];
 
   const reviewRows = reviews.slice(0, 20).map((r) =>
     '<div class="tl-row"><span class="tl-time">' + esc(fmtDateTime(r.createdAt)) + '</span>' +
@@ -2173,7 +2412,7 @@ async function openStoreFullModal(storeId) {
     '<span class="tl-detail">' + esc(r.userName) + ' — ' + esc(r.comment || 'بلا تعليق') + '</span></div>'
   ).join('');
 
-  const orderRows = orders.slice(0, 25).map((o) => {
+  const orderRows = (d.orders || []).slice(0, 25).map((o) => {
     const st = MARKET_STATUS_LABELS[o.status] || [o.status, ''];
     return '<div class="tl-row">' +
       '<span class="tl-time">' + esc(fmtDateTime(o.created_at)) + '</span>' +
@@ -2189,6 +2428,21 @@ async function openStoreFullModal(storeId) {
     (r.fee_minor != null ? ' — ' + fmtMoney(r.fee_minor / 100) : '') + '</span>'
   ).join('');
 
+  /* v5.9 — سطر المفتاح والاشتراك داخل رأس البطاقة */
+  const keyLine =
+    '<div class="store-hero-meta" style="margin-top:4px">' +
+    (s.key_plain
+      ? '<span class="dim tiny">المفتاح:</span> <span class="mono tiny" dir="ltr">' + esc(s.key_plain) + '</span> · '
+      : '<span class="badge red">بلا مفتاح</span> · ') +
+    (s.key_revoked_at
+      ? '<span class="badge red">مفتاح موقوف</span> · '
+      : (s.subscriptionActive
+        ? '<span class="badge green">فعّال حتى ' + esc(fmtDate(s.plan_expires_at)) + '</span> · '
+        : '<span class="badge red">منتهٍ' +
+          (s.plan_expires_at ? ' ' + esc(fmtDate(s.plan_expires_at)) : '') + '</span> · ')) +
+    (s.deadReason ? deadBadgeHtml(s.deadReason) : '') +
+    '</div>';
+
   showModal(
     '<div class="store-hero">' +
     storeAvatarHtml(s.logo_url, s.name, 56) +
@@ -2197,9 +2451,8 @@ async function openStoreFullModal(storeId) {
     '<div class="store-hero-meta">' +
     '<span class="dim tiny mono" dir="ltr">' + esc(s.store_number || '') + '</span> ' +
     (s.published ? '<span class="badge green">منشور</span>' : '<span class="badge">مخفي</span>') + ' ' +
-    (s.subscriptionActive ? '<span class="badge green">اشتراك فعّال</span>' : '<span class="badge red">اشتراك منتهي</span>') + ' ' +
     ratingHtml(d.rating, d.ratingCount) +
-    '</div></div></div>' +
+    '</div>' + keyLine + '</div></div>' +
 
     '<form id="storeProfileForm">' +
     '<div class="card-title" style="margin-top:18px">ملف المتجر (يظهر في تطبيق المستخدمين)</div>' +
@@ -2229,14 +2482,39 @@ async function openStoreFullModal(storeId) {
     '<div class="card-title" style="margin-top:18px">مناطق التوصيل</div>' +
     '<div class="chips">' + (regions || '<span class="dim tiny">لم يضف التاجر مناطق بعد</span>') + '</div>' +
 
-    '<div class="card-title" style="margin-top:18px">الكتالوج (' + products.length + ' منتجًا)' +
-    (products.some((p) => p.admin_hidden === 1)
-      ? ' <span class="dim tiny">— المنتجات المخفية لا تظهر للمشترين في المول</span>' : '') + '</div>' +
-    (products.length
-      ? '<div class="table-wrap" style="max-height:300px;overflow:auto"><table class="tbl"><thead><tr>' +
-        '<th>المنتج</th><th>السعر</th><th>المخزون</th><th>الصور</th><th>إجراء</th>' +
-        '</tr></thead><tbody>' + productRows + '</tbody></table></div>'
-      : '<div class="empty">لا منتجات معروضة — يضيفها التاجر من نقطة البيع</div>') +
+    /* v5.9 — إدارة منتجات المتجر (أدوات أشمل + تفاصيل + إجراءات) */
+    '<div class="card-title" style="margin-top:18px">إدارة المنتجات <span id="sfProdCount" class="dim tiny"></span></div>' +
+    '<div class="flex wrap" style="gap:8px;margin-bottom:10px">' +
+    '<input class="input" id="sfProdQ" placeholder="بحث بالاسم أو الباركود…" style="max-width:230px">' +
+    '<select class="input" id="sfProdFilter" style="max-width:170px">' +
+    '<option value="all">الكل</option>' +
+    '<option value="available">المعروض</option>' +
+    '<option value="unavailable">المسحوب</option>' +
+    '<option value="adminhidden">مخفي إدارياً</option>' +
+    '<option value="offers">عليه عرض</option>' +
+    '<option value="outofstock">نافد المخزون</option>' +
+    '<option value="stale">قديم (٣٠ يوماً+)</option>' +
+    '</select>' +
+    '<button class="btn ghost small" id="sfProdGo">بحث</button>' +
+    '</div>' +
+    '<div class="flex wrap" id="sfBulkBar" style="gap:8px;margin-bottom:10px;display:none;align-items:center">' +
+    '<b id="sfSelCount" class="tiny"></b>' +
+    '<button class="btn ghost small" id="sfSelPage">تحديد كل المعروض بالصفحة</button>' +
+    '<button class="btn small" id="sfBulkHide">إخفاء المحدد</button>' +
+    '<button class="btn success small" id="sfBulkShow">إظهار المحدد</button>' +
+    '<button class="btn danger small" id="sfBulkDel">حذف المحدد نهائياً</button>' +
+    '<button class="btn ghost small" id="sfSelClear">إلغاء التحديد</button>' +
+    '</div>' +
+    '<div id="sfProdBox"><div class="empty">جارٍ تحميل الكتالوج…</div></div>' +
+    '<div class="flex" style="gap:8px;margin-top:10px;align-items:center">' +
+    '<button class="btn ghost small" id="sfPrev" style="display:none">السابق</button>' +
+    '<span class="dim tiny" id="sfPageInfo"></span>' +
+    '<button class="btn ghost small" id="sfNext" style="display:none">التالي</button>' +
+    '</div>' +
+
+    /* v5.9 — زبائن المتجر */
+    '<div class="card-title" style="margin-top:18px">زبائن المتجر</div>' +
+    '<div id="sfCustomersBox"><div class="empty">جارٍ التحميل…</div></div>' +
 
     '<div class="card-title" style="margin-top:18px">تقييمات العملاء (' + d.ratingCount + ')</div>' +
     (reviewRows || '<div class="empty">لا تقييمات بعد</div>') +
@@ -2252,26 +2530,289 @@ async function openStoreFullModal(storeId) {
 
   $('#sfClose').onclick = closeModal;
 
-  /* v4.7: إخفاء/إظهار منتج — قرار إداري دائم يقاوم مزامنات التاجر. */
-  $$('[data-phide]').forEach((b) => {
-    b.onclick = () =>
-      confirmModal('إخفاء المنتج', 'سيختفي هذا المنتج من متجر المشترين فورًا، وسيبقى مخفيًا حتى تقرر إظهاره من هنا (حتى لو أعاد التاجر مزامنة كتالوجه).', 'إخفاء', async () => {
-        await api('/market/products/' + b.getAttribute('data-phide') + '/visibility',
-          {method: 'POST', body: {hidden: true}});
-        toast('أُخفي المنتج من المول', 'success');
-        openStoreFullModal(storeId).catch(showErr);
-      });
-  });
-  $$('[data-pshow]').forEach((b) => {
-    b.onclick = async () => {
-      try {
-        await api('/market/products/' + b.getAttribute('data-pshow') + '/visibility',
-          {method: 'POST', body: {hidden: false}});
-        toast('أُعيد المنتج للعرض', 'success');
-        openStoreFullModal(storeId).catch(showErr);
-      } catch (err) { showErr(err); }
+  /* v5.9 — أدوات الكتالوج (الحالة هُيّئت في رأس الدالة قبل النداء) */
+  const qInput = $('#sfProdQ');
+  const fSelect = $('#sfProdFilter');
+  if (qInput) {
+    qInput.onkeydown = (ev) => {
+      if (ev.key === 'Enter') { ev.preventDefault(); applyAndLoad(); }
     };
-  });
+  }
+  if (fSelect) fSelect.onchange = applyAndLoad;
+  const goBtn = $('#sfProdGo');
+  if (goBtn) goBtn.onclick = applyAndLoad;
+
+  function applyAndLoad() {
+    if (!sfProducts) return;
+    sfProducts.q = (qInput && qInput.value.trim()) || '';
+    sfProducts.filter = (fSelect && fSelect.value) || 'all';
+    sfProducts.page = 1;
+    loadSfProducts().catch(showErr);
+  }
+
+  const prevBtn = $('#sfPrev');
+  const nextBtn = $('#sfNext');
+  if (prevBtn) prevBtn.onclick = () => {
+    if (sfProducts && sfProducts.page > 1) {
+      sfProducts.page -= 1;
+      loadSfProducts().catch(showErr);
+    }
+  };
+  if (nextBtn) nextBtn.onclick = () => {
+    if (sfProducts && sfProducts.page < Math.ceil(sfProducts.total / sfProducts.per)) {
+      sfProducts.page += 1;
+      loadSfProducts().catch(showErr);
+    }
+  };
+
+  const selPageBtn = $('#sfSelPage');
+  if (selPageBtn) selPageBtn.onclick = () => {
+    if (!sfProducts) return;
+    $$('.sf-pick').forEach((c) => { if (c.checked === false) c.checked = true; });
+    syncSelectionFromDom();
+    renderSfBulkBar();
+  };
+  const selClearBtn = $('#sfSelClear');
+  if (selClearBtn) selClearBtn.onclick = () => {
+    if (!sfProducts) return;
+    sfProducts.selected.clear();
+    $$('.sf-pick').forEach((c) => { c.checked = false; });
+    renderSfBulkBar();
+  };
+
+  function syncSelectionFromDom() {
+    if (!sfProducts) return;
+    $$('.sf-pick').forEach((c) => {
+      const pid = Number(c.getAttribute('data-pid'));
+      if (c.checked) sfProducts.selected.add(pid);
+      else sfProducts.selected.delete(pid);
+    });
+  }
+
+  function renderSfBulkBar() {
+    if (!sfProducts) return;
+    const bar = $('#sfBulkBar');
+    const countEl = $('#sfSelCount');
+    if (!bar) return;
+    if (sfProducts.selected.size > 0) {
+      bar.style.display = '';
+      if (countEl) countEl.textContent = sfProducts.selected.size + ' منتج محدد';
+    } else {
+      bar.style.display = 'none';
+    }
+  }
+
+  const bulkHideBtn = $('#sfBulkHide');
+  if (bulkHideBtn) bulkHideBtn.onclick = () => sfBulkAction('hide');
+  const bulkShowBtn = $('#sfBulkShow');
+  if (bulkShowBtn) bulkShowBtn.onclick = () => sfBulkAction('show');
+  const bulkDelBtn = $('#sfBulkDel');
+  if (bulkDelBtn) bulkDelBtn.onclick = () => sfBulkAction('delete');
+
+  function sfBulkAction(action) {
+    if (!sfProducts || sfProducts.selected.size === 0) return;
+    const ids = Array.from(sfProducts.selected);
+    const labels = {
+      hide: 'إخفاء المنتجات المحددة',
+      show: 'إظهار المنتجات المحددة',
+      delete: 'حذف المنتجات المحددة نهائياً',
+    };
+    const hints = {
+      hide: 'ستُخفى من متجر المشترين فوراً وتبقى مخفية حتى تقرر إظهارها من هنا (حتى لو أعاد التاجر مزامنة كتالوجه).',
+      show: 'ستعود للعرض في متجر المشترين فوراً.',
+      delete: 'حذف نهائي لا يمكن التراجع عنه (صورها تُكنس دورياً).',
+    };
+    confirmModal(labels[action], hints[action] + ' (' + ids.length + ' منتجاً)', 'تنفيذ', async () => {
+      const r = await api('/market/products/bulk', {method: 'POST', body: {ids, action}});
+      toast('نُفّذ الإجراء على ' + (r.affected || 0) + ' منتجاً', 'success');
+      sfProducts.selected.clear();
+      loadSfProducts().catch(showErr);
+    });
+  }
+
+  /* v5.9 — تحميل صفحة الكتالوج من نقطة الإدارة الجديدة */
+  async function loadSfProducts() {
+    const box = $('#sfProdBox');
+    const my = sfProducts;
+    if (!box || !my) return;
+    box.innerHTML = '<div class="empty">جارٍ التحميل…</div>';
+    const d = await api('/market/stores/' + my.storeId +
+      '/products?q=' + encodeURIComponent(my.q) +
+      '&filter=' + encodeURIComponent(my.filter) +
+      '&page=' + my.page + '&per=' + my.per);
+    if (mySeq !== sfModalSeq || sfProducts !== my) return; // بطاقة أخرى فُتحت
+    my.total = d.total || 0;
+    const pages = Math.max(1, Math.ceil(sfProducts.total / sfProducts.per));
+
+    const countEl = $('#sfProdCount');
+    if (countEl) {
+      countEl.textContent = '(' + sfProducts.total + ' منتجاً' +
+        (sfProducts.q || sfProducts.filter !== 'all' ? ' مطابقاً' : '') + ')';
+    }
+    const pageInfo = $('#sfPageInfo');
+    if (pageInfo) pageInfo.textContent = 'صفحة ' + sfProducts.page + ' من ' + pages;
+    const prevB = $('#sfPrev');
+    const nextB = $('#sfNext');
+    if (prevB) prevB.style.display = sfProducts.page > 1 ? '' : 'none';
+    if (nextB) nextB.style.display = sfProducts.page < pages ? '' : 'none';
+
+    const now = Date.now();
+    const STALE_MS = 30 * 86400000;
+
+    function productBadges(p) {
+      let out = '';
+      if (p.admin_hidden === 1) out += ' <span class="badge">مخفي إدارياً</span>';
+      else if (p.available !== 1) out += ' <span class="badge amber">مسحوب</span>';
+      const pct = Number(p.discount_pct) || 0;
+      if (pct > 0) out += ' <span class="badge orange">-' + pct + '%</span>';
+      if (Number(p.stock) <= 0) out += ' <span class="badge red">نافد</span>';
+      else if (p.available === 1 && p.updated_at < now - STALE_MS) out += ' <span class="badge amber">قديم</span>';
+      return out;
+    }
+
+    function productMeta(p) {
+      const bits = [];
+      if (p.category) bits.push(esc(p.category));
+      if (p.barcode) bits.push('<span class="mono" dir="ltr">' + esc(p.barcode) + '</span>');
+      if (p.sold_by_weight === 1) bits.push('بالوزن' + (p.unit_label ? ' (' + esc(p.unit_label) + ')' : ''));
+      else if (p.unit_label) bits.push(esc(p.unit_label));
+      if (p.description) bits.push('<span title="' + esc(p.description) + '">' + esc(String(p.description).slice(0, 40)) + (String(p.description).length > 40 ? '…' : '') + '</span>');
+      return bits.length ? '<br><span class="dim tiny">' + bits.join(' · ') + '</span>' : '';
+    }
+
+    function productThumb(p) {
+      if (p.images && p.images.length) {
+        return '<img class="store-logo" src="' + esc(p.images[0]) + '" alt="" loading="lazy" ' +
+          'style="width:38px;height:38px;object-fit:cover;border-radius:8px">';
+      }
+      return '<span class="store-logo letter" style="width:38px;height:38px;font-size:16px">' +
+        esc(String(p.name || 'م').trim().charAt(0) || 'م') + '</span>';
+    }
+
+    function priceHtml(p) {
+      const price = (Number(p.price_minor) || 0) / 100;
+      const pct = Number(p.discount_pct) || 0;
+      if (pct > 0) {
+        const final = price * (1 - pct / 100);
+        return '<s class="dim">' + fmtMoney(price) + '</s><br><b>' + fmtMoney(final) + '</b>';
+      }
+      return fmtMoney(price);
+    }
+
+    function actionBtns(p) {
+      const hidden = p.admin_hidden === 1;
+      return (hidden
+        ? '<button class="btn success small" data-pshow="' + p.id + '">إظهار</button> '
+        : '<button class="btn ghost small" data-phide="' + p.id + '">إخفاء</button> ') +
+        '<button class="btn danger small" data-pdel="' + p.id + '" data-pname="' + esc(p.name) + '">حذف</button>';
+    }
+
+    const rows = (d.products || []).map((p) =>
+      '<tr' + (p.available !== 1 ? ' style="opacity:.6"' : '') + '>' +
+      '<td><input type="checkbox" class="sf-pick" data-pid="' + p.id + '"' +
+        (sfProducts.selected.has(p.id) ? ' checked' : '') + '></td>' +
+      '<td>' + productThumb(p) + '</td>' +
+      '<td><b>' + esc(p.name) + '</b>' + productBadges(p) + productMeta(p) + '</td>' +
+      '<td class="num">' + priceHtml(p) + '</td>' +
+      '<td class="num">' + (p.stock != null ? p.stock : '—') + '</td>' +
+      '<td class="dim tiny">' + esc(fmtDate(p.updated_at)) + '</td>' +
+      '<td class="actions">' + actionBtns(p) + '</td>' +
+      '</tr>'
+    ).join('');
+
+    const cards = (d.products || []).map((p) =>
+      '<div class="mcard"' + (p.available !== 1 ? ' style="opacity:.75"' : '') + '>' +
+      '<div class="m-top" style="gap:8px">' +
+      '<label style="display:flex;align-items:center;gap:8px">' +
+      '<input type="checkbox" class="sf-pick" data-pid="' + p.id + '"' +
+        (sfProducts.selected.has(p.id) ? ' checked' : '') + '>' +
+      productThumb(p) + '<span class="m-title">' + esc(p.name) + '</span></label>' +
+      '</div>' +
+      '<div class="m-rows">' +
+      '<div class="r"><span>الحالة</span><b>' + (productBadges(p).trim() || 'معروض') + '</b></div>' +
+      '<div class="r"><span>السعر</span><b>' + priceHtml(p) + '</b></div>' +
+      '<div class="r"><span>المخزون</span><b>' + (p.stock != null ? p.stock : '—') + '</b></div>' +
+      (p.barcode ? '<div class="r"><span>الباركود</span><b class="mono" dir="ltr">' + esc(p.barcode) + '</b></div>' : '') +
+      '<div class="r"><span>آخر تحديث</span><b>' + esc(fmtDate(p.updated_at)) + '</b></div>' +
+      '</div>' +
+      '<div class="m-actions">' + actionBtns(p) + '</div>' +
+      '</div>'
+    ).join('');
+
+    if (!(d.products || []).length) {
+      box.innerHTML = '<div class="empty">لا منتجات تطابق البحث/الفلتر' +
+        (sfProducts.filter === 'all' && !sfProducts.q ? ' — يضيفها التاجر من نقطة البيع' : '') + '</div>';
+    } else {
+      box.innerHTML =
+        '<div class="table-wrap"><table class="tbl"><thead><tr>' +
+        '<th></th><th></th><th>المنتج</th><th>السعر</th><th>المخزون</th>' +
+        '<th>آخر تحديث</th><th></th>' +
+        '</tr></thead><tbody>' + rows + '</tbody></table></div>' +
+        '<div class="cards-list">' + cards + '</div>';
+    }
+
+    /* ربط أحداث الصفحة الحالية */
+    $$('.sf-pick').forEach((c) => {
+      c.onchange = () => {
+        syncSelectionFromDom();
+        renderSfBulkBar();
+      };
+    });
+    $$('[data-phide]').forEach((b) => {
+      b.onclick = () =>
+        confirmModal('إخفاء المنتج', 'سيختفي هذا المنتج من متجر المشترين فورًا، وسيبقى مخفيًا حتى تقرر إظهاره من هنا (حتى لو أعاد التاجر مزامنة كتالوجه).', 'إخفاء', async () => {
+          await api('/market/products/' + b.getAttribute('data-phide') + '/visibility',
+            {method: 'POST', body: {hidden: true}});
+          toast('أُخفي المنتج من المول', 'success');
+          loadSfProducts().catch(showErr);
+        });
+    });
+    $$('[data-pshow]').forEach((b) => {
+      b.onclick = async () => {
+        try {
+          await api('/market/products/' + b.getAttribute('data-pshow') + '/visibility',
+            {method: 'POST', body: {hidden: false}});
+          toast('أُعيد المنتج للعرض', 'success');
+          loadSfProducts().catch(showErr);
+        } catch (err) { showErr(err); }
+      };
+    });
+    $$('[data-pdel]').forEach((b) => {
+      b.onclick = () =>
+        confirmModal('حذف المنتج نهائياً',
+          '«' + b.getAttribute('data-pname') + '» — حذف نهائي من كتالوج المتجر لا يمكن التراجع عنه.',
+          'حذف نهائي', async () => {
+            await api('/market/products/' + b.getAttribute('data-pdel') + '/delete', {method: 'POST'});
+            toast('حُذف المنتج نهائياً', 'success');
+            loadSfProducts().catch(showErr);
+          });
+    });
+    renderSfBulkBar();
+  }
+
+  /* v5.9 — زبائن المتجر */
+  async function loadSfCustomers() {
+    const box = $('#sfCustomersBox');
+    if (!box) return;
+    const d = await api('/market/stores/' + storeId + '/customers');
+    if (mySeq !== sfModalSeq) return; // بطاقة أخرى فُتحت
+    const rows = (d.customers || []).map((c) =>
+      '<div class="tl-row">' +
+      '<span class="tl-time">' + esc(fmtDateTime(c.last_order_at)) + '</span>' +
+      '<span class="tl-event">' + esc(c.name || '—') + '</span>' +
+      '<span class="tl-detail">' +
+      '<span class="mono tiny" dir="ltr">' + esc(c.phone || '') + '</span> · ' +
+      (c.orders_count || 0) + ' طلب' +
+      (Number(c.delivered_count) > 0 ? ' (' + c.delivered_count + ' مُسلّم)' : '') +
+      ' · أنفق ' + fmtMoney((Number(c.spent_minor) || 0) / 100) +
+      (c.disabled ? ' · <span class="badge red">معطّل</span>' : '') +
+      '</span></div>'
+    ).join('');
+    box.innerHTML = rows || '<div class="empty">لا زبائن بعد — أول طلب يظهر هنا</div>';
+  }
+
+  loadSfProducts().catch(showErr);
+  loadSfCustomers().catch(showErr);
 
   $('#storeProfileForm').onsubmit = async (ev) => {
     ev.preventDefault();

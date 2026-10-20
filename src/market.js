@@ -460,6 +460,32 @@ const m = {
      JOIN admin_hidden_products h ON h.product_id = p.id
      WHERE p.store_id = ?`),
 
+  /* ── v5.9 (الجولة 71): المتاجر الميتة والمنتجات اليتيمة ─────────
+   * طلب المالك بالنص: «إمكانية تنظيف المنتجات التي لم تعد مرتبطة
+   * بأي متجر وبقيت معروضة في المتجر دون تنظيف». المتجر الميت =
+   * مفتاحه محذوف/موقوف أو منتهٍ منذ أكثر من مهلة السماح؛ مزامنات
+   * POS توقفت عنه فتبقى منتجاته available=1 إلى الأبد (قبر
+   * المنتجات يمس available=0 فقط)، تتضخم بها الإحصاءات وتختبئ
+   * خلف متاجر لم تكن تظهر أصلاً باللوحة (INNER JOIN سابق على
+   * المفاتيح). هذه العبارات تخدم الفحص والتنظيف. */
+  storeLivenessById: db.prepare(
+    `SELECT s.id, s.store_number, s.name, s.published, s.updated_at AS store_updated_at,
+            s.last_seen_at,
+            (k.id IS NULL) AS key_missing, k.revoked_at, k.plan_expires_at, k.key_plain,
+            (SELECT COUNT(*) FROM store_products p WHERE p.store_id = s.id AND p.available = 1) AS products_count,
+            (SELECT COUNT(*) FROM store_products p WHERE p.store_id = s.id AND p.available = 0) AS unavailable_count,
+            (SELECT COUNT(*) FROM market_orders o WHERE o.store_id = s.id) AS orders_count
+     FROM stores s LEFT JOIN keys k ON k.id = s.key_id
+     WHERE s.id = ?`),
+  productsSampleOfStore: db.prepare(
+    'SELECT name FROM store_products WHERE store_id = ? ORDER BY updated_at DESC LIMIT 5'),
+  hideProductsOfStore: db.prepare(
+    'UPDATE store_products SET available = 0, updated_at = ? WHERE store_id = ? AND available = 1'),
+  deleteProductsOfStore: db.prepare('DELETE FROM store_products WHERE store_id = ?'),
+  deleteProductById: db.prepare('DELETE FROM store_products WHERE id = ?'),
+  setProductAvailable: db.prepare(
+    'UPDATE store_products SET available = ?, updated_at = ? WHERE id = ?'),
+
   publishedStores: db.prepare(
     `SELECT s.id, s.store_number, s.name, s.description, s.category, s.region, s.phone, s.whatsapp,
             s.logo_image_id
@@ -880,6 +906,21 @@ function keyActive(keyRow, now) {
   if (keyRow.revoked_at) return false;
   if (keyRow.plan_expires_at == null) return false;
   return keyRow.plan_expires_at > now;
+}
+
+/* ── v5.9 (الجولة 71): تصنيف «المتجر الميت» ──────────────────────
+ * مفتاح محذوف أو موقوف أو منتهٍ منذ أكثر من مهلة سماح التجديد
+ * (نفس مهلة قبر المنتجات ١٤ يوماً). متجر انتهى اشتراكه بالأمس
+ * ليس ميتاً — قد يجدد؛ المتجر الميت هو الذي لا مزامنة متوقعة
+ * منه ولا نشر ممكن، ومنتجاته المعروضة (available=1) بقت بلا
+ * صاحب يحدّثها أو يخفيها — «يتيمة» بالمعنى الحرفي. */
+const DEAD_STORE_GRACE_MS = 14 * DAY_MS;
+function deadStoreReason(row, now) {
+  if (row.key_missing === 1 || row.key_plain == null) return 'key_missing';
+  if (row.revoked_at != null) return 'revoked';
+  if (row.plan_expires_at == null) return 'no_subscription';
+  if (row.plan_expires_at <= now - DEAD_STORE_GRACE_MS) return 'expired';
+  return null;
 }
 
 /** الحارس الدوري: إخفاء متاجر المفاتيح المنتهية/الموقوفة.
@@ -2509,8 +2550,13 @@ function buildMarketAdminRouter() {
   }
 
   router.get('/stores', (req, res) => {
+    /* v5.9: LEFT JOIN — المتاجر ذات المفاتيح المحذوفة كانت تختفي
+     * من اللوحة تماماً (INNER JOIN) ومنتجاتها تبقى في القاعدة
+     * معروضة بلا صاحب ولا تظهر لأحد. الآن تظهر بعلامة «بلا مفتاح»
+     * ويمكن تنظيفها من أداة المتاجر الميتة. */
     const rows = db.prepare(
       `SELECT s.*, k.key_plain, k.revoked_at, k.plan_expires_at,
+         (k.id IS NULL) AS key_missing,
          (SELECT COUNT(*) FROM store_products p
            WHERE p.store_id = s.id AND p.available = 1) AS products_count,
          (SELECT COUNT(*) FROM store_products p
@@ -2520,7 +2566,7 @@ function buildMarketAdminRouter() {
            WHERE o.store_id = s.id AND o.status = 'new') AS new_orders,
          (SELECT AVG(r.stars) FROM market_ratings r WHERE r.store_id = s.id) AS rating_avg,
          (SELECT COUNT(*) FROM market_ratings r WHERE r.store_id = s.id) AS rating_count
-       FROM stores s JOIN keys k ON k.id = s.key_id
+       FROM stores s LEFT JOIN keys k ON k.id = s.key_id
        ORDER BY s.updated_at DESC LIMIT 500`,
     ).all();
     const now = Date.now();
@@ -2531,6 +2577,7 @@ function buildMarketAdminRouter() {
         return {
           ...r,
           subscriptionActive: !r.revoked_at && r.plan_expires_at != null && r.plan_expires_at > now,
+          deadReason: deadStoreReason(r, now),
           ...(logo != null ? {logo_url: logo} : {}),
         };
       }),
@@ -2591,6 +2638,224 @@ function buildMarketAdminRouter() {
     res.json({ok: true});
   });
 
+  /* ── v5.9 (الجولة 71): حذف منتج واحد نهائياً — قرار إداري خلاف
+   * الإخفاء الدائم القابل للتراجع. روابط صوره تُحذف تبعاً (CASCADE)
+   * وقرار الإخفاء الإداري معه؛ ملفات الصور تُكنس دورياً حين تتيم. */
+  router.post('/products/:id/delete', (req, res) => {
+    const id = Number(req.params.id);
+    const product = m.storeProductAnyById.get(id);
+    if (product == null) return res.status(404).json({ok: false, error: 'NOT_FOUND'});
+    m.deleteProductById.run(id);
+    audit('admin_market_product_delete', {adminId: req.adminUser.id, ip: req.ip,
+      details: {productId: id, storeId: product.store_id, name: product.name}});
+    res.json({ok: true});
+  });
+
+  /* ── v5.9: إجراء جماعي على منتجات (حتى 500) — إخفاء/إظهار/حذف.
+   * نفس دلالات الإجراء المفرد بعينها، دفعة واحدة داخل معاملة. */
+  router.post('/products/bulk', (req, res) => {
+    const body = req.body || {};
+    const action = ['hide', 'show', 'delete'].includes(body.action) ? body.action : null;
+    const ids = Array.isArray(body.ids)
+      ? body.ids.map(Number).filter(n => Number.isInteger(n) && n > 0).slice(0, 500)
+      : [];
+    if (action == null || ids.length === 0) {
+      return res.status(400).json({ok: false, error: 'BAD_REQUEST'});
+    }
+    const now = Date.now();
+    let affected = 0;
+    db.transaction(() => {
+      for (const id of ids) {
+        if (m.storeProductAnyById.get(id) == null) continue;
+        if (action === 'hide') {
+          m.hideProduct.run(id, req.adminUser.id, now);
+          m.setProductAvailable.run(0, now, id);
+        } else if (action === 'show') {
+          m.unhideProduct.run(id);
+          m.setProductAvailable.run(1, now, id);
+        } else {
+          m.deleteProductById.run(id);
+        }
+        affected += 1;
+      }
+    })();
+    audit('admin_market_products_bulk', {adminId: req.adminUser.id, ip: req.ip,
+      details: {action, requested: ids.length, affected}});
+    res.json({ok: true, affected});
+  });
+
+  /* ── v5.9: كتالوج المتجر للإدارة — بحث (اسم/باركود/معرف) وفلترة
+   * (معروض/مسحوب/مخفي إدارياً/عروض/نافد/قديم لم يُحدَّث 30 يوماً)
+   * وصفحات — أساس إدارة المنتجات في بطاقة المتجر. */
+  router.get('/stores/:id/products', (req, res) => {
+    const store = adminStore(req.params.id);
+    if (!store) return res.status(404).json({ok: false, error: 'NOT_FOUND'});
+    const q = String(req.query.q || '').trim();
+    const filter = String(req.query.filter || 'all');
+    const page = Math.max(1, Math.min(500, Number(req.query.page) || 1));
+    const per = Math.min(200, Math.max(1, Number(req.query.per) || 100));
+    const where = ['p.store_id = ?'];
+    const params = [store.id];
+    if (q) {
+      where.push(
+        `(p.name LIKE ? ESCAPE '\\' OR p.barcode LIKE ? ESCAPE '\\' OR p.product_ref LIKE ? ESCAPE '\\')`);
+      const like = q.replace(/[\\%_]/g, c => '\\' + c) + '%';
+      params.push(like, like, like);
+    }
+    if (filter === 'available') where.push('p.available = 1');
+    else if (filter === 'unavailable') where.push('p.available = 0');
+    else if (filter === 'adminhidden') where.push('h.product_id IS NOT NULL');
+    else if (filter === 'offers') where.push('p.discount_pct > 0');
+    else if (filter === 'outofstock') where.push('p.stock <= 0');
+    else if (filter === 'stale') {
+      where.push('p.available = 1', 'p.updated_at < ?');
+      params.push(Date.now() - 30 * DAY_MS);
+    }
+    const whereSql = where.join(' AND ');
+    const total = db.prepare(
+      `SELECT COUNT(*) AS n FROM store_products p
+       LEFT JOIN admin_hidden_products h ON h.product_id = p.id
+       WHERE ${whereSql}`).get(...params).n;
+    const rows = db.prepare(
+      `SELECT p.*, (h.product_id IS NOT NULL) AS admin_hidden
+       FROM store_products p
+       LEFT JOIN admin_hidden_products h ON h.product_id = p.id
+       WHERE ${whereSql}
+       ORDER BY (p.available = 1) DESC, p.name COLLATE NOCASE ASC
+       LIMIT ? OFFSET ?`,
+    ).all(...params, per, (page - 1) * per);
+    res.json({
+      ok: true,
+      total, page, per,
+      products: rows.map(p => ({...p, images: m.imagesOfProducts.all(p.id).map(imageUrl)})),
+    });
+  });
+
+  /* ── v5.9: زبائن المتجر — من طلب منه وكم مرة وآخر طلب — يظهر
+   * في بطاقة المتجر (طلب المالك: إجراءات أوسع تشمل المستخدمين). */
+  router.get('/stores/:id/customers', (req, res) => {
+    const store = adminStore(req.params.id);
+    if (!store) return res.status(404).json({ok: false, error: 'NOT_FOUND'});
+    const rows = db.prepare(
+      `SELECT u.id, u.name, u.phone, u.disabled, u.last_seen_at,
+              COUNT(o.id) AS orders_count,
+              SUM(o.status = 'delivered') AS delivered_count,
+              SUM(o.total_minor) AS spent_minor,
+              MAX(o.created_at) AS last_order_at
+       FROM market_orders o JOIN market_users u ON u.id = o.user_id
+       WHERE o.store_id = ?
+       GROUP BY u.id
+       ORDER BY last_order_at DESC LIMIT 200`).all(store.id);
+    res.json({ok: true, customers: rows});
+  });
+
+  /* ── v5.9 (الجولة 71): فحص المتاجر الميتة والمنتجات اليتيمة ──
+   * كل متجر مفتاحه محذوف/موقوف/منتهٍ (> ١٤ يوم) مع عدد منتجاته
+   * المعروضة وعينة منها وعدد طلباته — الأساس قبل أي تنظيف. */
+  router.get('/stores/orphan-scan', (_req, res) => {
+    const now = Date.now();
+    const groups = [];
+    const rows = db.prepare(
+      `SELECT s.id, s.store_number, s.name, s.published, s.updated_at AS store_updated_at,
+              s.last_seen_at,
+              (k.id IS NULL) AS key_missing, k.revoked_at, k.plan_expires_at, k.key_plain,
+              (SELECT COUNT(*) FROM store_products p WHERE p.store_id = s.id AND p.available = 1) AS products_count,
+              (SELECT COUNT(*) FROM store_products p WHERE p.store_id = s.id AND p.available = 0) AS unavailable_count,
+              (SELECT MAX(p.updated_at) FROM store_products p WHERE p.store_id = s.id) AS last_product_update,
+              (SELECT COUNT(*) FROM market_orders o WHERE o.store_id = s.id) AS orders_count
+       FROM stores s LEFT JOIN keys k ON k.id = s.key_id`).all();
+    for (const row of rows) {
+      const reason = deadStoreReason(row, now);
+      if (reason == null) continue;
+      groups.push({
+        store: {
+          id: row.id, store_number: row.store_number, name: row.name,
+          published: row.published === 1, updated_at: row.store_updated_at,
+          last_seen_at: row.last_seen_at,
+        },
+        reason,
+        products: row.products_count,
+        unavailable: row.unavailable_count,
+        lastProductUpdate: row.last_product_update,
+        orders: row.orders_count,
+        sample: m.productsSampleOfStore.all(row.id).map(p => p.name),
+        deletableStore: row.orders_count === 0,
+      });
+    }
+    groups.sort((a, b) => (b.products + b.unavailable) - (a.products + a.unavailable));
+    res.json({
+      ok: true,
+      groups,
+      totals: {
+        deadStores: groups.length,
+        orphanProducts: groups.reduce((a, g) => a + g.products, 0),
+        deletableStores: groups.filter(g => g.deletableStore).length,
+      },
+    });
+  });
+
+  /* ── v5.9: التنظيف الجماعي — إخفاء (soft: تدخل قبر ١٤ يوماً ثم
+   * يحذفها التنظيف الدوري) أو حذف نهائي لمنتجات المتاجر الميتة.
+   * المتجر الحي محمي دائماً مهما أُرسل من معرفات. */
+  router.post('/stores/orphan-clean', (req, res) => {
+    const body = req.body || {};
+    const mode = body.mode === 'delete' ? 'delete' : 'hide';
+    const all = body.all === true;
+    const ids = Array.isArray(body.storeIds)
+      ? body.storeIds.map(Number).filter(n => Number.isInteger(n) && n > 0).slice(0, 200)
+      : [];
+    if (!all && ids.length === 0) {
+      return res.status(400).json({ok: false, error: 'NO_STORES'});
+    }
+    const now = Date.now();
+    let stores = 0, productsHidden = 0, productsDeleted = 0;
+    db.transaction(() => {
+      const rows = db.prepare(
+        `SELECT s.id,
+                (k.id IS NULL) AS key_missing, k.revoked_at, k.plan_expires_at, k.key_plain
+         FROM stores s LEFT JOIN keys k ON k.id = s.key_id`).all();
+      for (const row of rows) {
+        if (!all && !ids.includes(row.id)) continue;
+        if (deadStoreReason(row, now) == null) continue; // حي — لا يُمس
+        stores += 1;
+        if (mode === 'delete') {
+          productsDeleted += m.deleteProductsOfStore.run(row.id).changes;
+        } else {
+          productsHidden += m.hideProductsOfStore.run(now, row.id).changes;
+        }
+      }
+    })();
+    audit('admin_market_orphan_clean', {adminId: req.adminUser.id, ip: req.ip,
+      details: {mode, all, storeIds: ids, stores, productsHidden, productsDeleted}});
+    res.json({ok: true, stores, productsHidden, productsDeleted});
+  });
+
+  /* ── v5.9: حذف متجر ميت نهائياً بكل صفوفه (منتجات ومناطق وصور —
+   * CASCADE) وملفات صوره من القرص. متجر حي أو ذو طلبات لا يُحذف:
+   * الحي يُدار بالنشر/الإخفاء، وذو الطلبات تاريخ محاسبي محفوظ. */
+  router.post('/stores/:id/delete', (req, res) => {
+    const id = Number(req.params.id);
+    const store = adminStore(id);
+    if (!store) return res.status(404).json({ok: false, error: 'NOT_FOUND'});
+    const liveness = m.storeLivenessById.get(id);
+    if (liveness == null || deadStoreReason(liveness, Date.now()) == null) {
+      return res.status(409).json({ok: false, error: 'STORE_ALIVE'});
+    }
+    if (m.ordersCountByStore.get(id).n > 0) {
+      return res.status(409).json({ok: false, error: 'STORE_HAS_ORDERS'});
+    }
+    db.transaction(() => {
+      m.deleteStoreRow.run(id);
+    })();
+    // ملفات صوره من القرص — أفضل جهد (فشلها لا يفشل الحذف)
+    try {
+      fs.rmSync(path.join(IMAGES_DIR, String(id)), {recursive: true, force: true});
+    } catch (_) { /* أفضل جهد */ }
+    audit('admin_market_store_delete', {adminId: req.adminUser.id, ip: req.ip,
+      details: {storeId: id, storeNumber: store.store_number, name: store.name}});
+    res.json({ok: true});
+  });
+
   /* v4.5: بطاقة المتجر الكاملة — ملف + شعار + مناطق + كتالوج
    * (بالخصومات والصور) + التقييمات + الطلبات الأخيرة.
    * v4.7: الكتالوج يعرض المعروض والمخفي إدارياً معاً (الإخفاء
@@ -2598,7 +2863,10 @@ function buildMarketAdminRouter() {
   router.get('/stores/:id/full', (req, res) => {
     const store = adminStore(req.params.id);
     if (!store) return res.status(404).json({ok: false, error: 'NOT_FOUND'});
-    const keyRow = stmt.keyById.get(store.key_id);
+    /* v5.9: المتاجر ذات المفاتيح المحذوفة صارت تُرى — حماية من صف
+     * مفتاح معدوم كان يفجّر النداء (keyRow.revoked_at على undefined). */
+    const keyRow = stmt.keyById.get(store.key_id) ||
+      {key_plain: null, revoked_at: 1, plan_expires_at: null};
     const now = Date.now();
     const stats = m.ratingStatsStore.get(store.id);
     const products = db.prepare(
@@ -2613,6 +2881,12 @@ function buildMarketAdminRouter() {
       store: {
         ...store,
         subscriptionActive: !keyRow.revoked_at && keyRow.plan_expires_at != null && keyRow.plan_expires_at > now,
+        /* v5.9: معلومات الاشتراك للمدير — المفتاح وانتهاؤه وحالة الإيقاف */
+        key_plain: keyRow.key_plain,
+        plan_expires_at: keyRow.plan_expires_at,
+        key_revoked_at: keyRow.revoked_at,
+        deadReason: deadStoreReason(
+          {...keyRow, key_missing: keyRow.key_plain == null ? 1 : 0}, now),
         ...(storeLogoUrl(store) != null ? {logo_url: storeLogoUrl(store)} : {}),
       },
       deliveryRegions: m.listRegions.all(store.id),
@@ -2813,9 +3087,32 @@ function buildMarketAdminRouter() {
         'SELECT COUNT(*) n FROM market_users WHERE disabled = 0 AND last_seen_at > ?',
         now - 30 * DAY_MS),
       addresses: count('SELECT COUNT(*) n FROM market_addresses'),
-      products: count('SELECT COUNT(*) n FROM store_products WHERE available = 1'),
+      /* v5.9: «منتجات معروضة» كان يحسب كل available=1 حتى منتجات
+       * المتاجر الميتة (مفتاح محذوف/منتهٍ) — رقم متضخم يخفي المشكلة
+       * نفسها. الآن يحسب ما يراه المشتري فعلاً (متجر منشور + مفتاح
+       * حي)، واليتيمة لها رقمها الصريح أدناه. */
+      products: count(
+        `SELECT COUNT(*) n FROM store_products p
+         JOIN stores s ON s.id = p.store_id
+         JOIN keys k ON k.id = s.key_id
+         WHERE p.available = 1 AND s.published = 1
+           AND k.revoked_at IS NULL
+           AND k.plan_expires_at IS NOT NULL AND k.plan_expires_at > ?`, now),
+      ghostProducts: count(
+        `SELECT COUNT(*) n FROM store_products p
+         JOIN stores s ON s.id = p.store_id
+         LEFT JOIN keys k ON k.id = s.key_id
+         WHERE p.available = 1 AND (
+             k.id IS NULL OR k.revoked_at IS NOT NULL
+             OR k.plan_expires_at IS NULL OR k.plan_expires_at <= ?
+           )`, now - 14 * DAY_MS),
       discountedProducts: count(
-        'SELECT COUNT(*) n FROM store_products WHERE available = 1 AND discount_pct > 0'),
+        `SELECT COUNT(*) n FROM store_products p
+         JOIN stores s ON s.id = p.store_id
+         JOIN keys k ON k.id = s.key_id
+         WHERE p.available = 1 AND p.discount_pct > 0 AND s.published = 1
+           AND k.revoked_at IS NULL
+           AND k.plan_expires_at IS NOT NULL AND k.plan_expires_at > ?`, now),
       ratingCount: ratingRow.n,
       ratingAvg: ratingRow.n > 0 ? Math.round(ratingRow.avg_stars * 10) / 10 : null,
       orders: count('SELECT COUNT(*) n FROM market_orders'),
